@@ -11,16 +11,6 @@ class QueryIntent(Enum):
     QUESTION = 1,
     EMBEDDING = 2
 
-v3_api_keys = ["sk-k9rLQCwGc0y1CPVRCb27F261206c47C3A9E6Bc9a076f34B9", 
-            "sk-f1iYyHwqzhKaCdgp3532B18b623c4009B3C862CbF1096012", 
-            "sk-SSKcCg4VHzmUbQVU494d50565a0c48349933BdD98425D288",
-            "sk-jgJeUkNqks5aouo58fFdA5B62d4e41A6A1C9DfD175DbB20f",
-            "sk-h9RHx26FRXcPuqus84E0220e8d7746728885531dB4751cA4",
-            "sk-B9AmdunaQfRZHMRn7eBf86753870425dA3FaCb2b72AeD20f",
-            "sk-kd48MeZ8bSAOuchiAaB34aFcE3C248A0B9Ab3d1b53F2C2C8",
-            "sk-mRtDuepsyGIrRsxcB1B00cDc072c4d42A54cF2D418B77aAe",
-            "sk-lh8YYRHVnOFA0oH320C7C26bAfE04d13899eDc6041C32338",
-            "sk-UfL3N6xtniByttjmA69c34101c4843BbA1D8A33aBdC84cBe"]
 
 class OpenAiRequestor():
     def __init__(self, model, api_keys=v3_api_keys, url=None, logger=None, timeout=60, max_retries = 3) -> None:
