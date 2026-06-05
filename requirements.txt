@@ -1,0 +1,39 @@
+# ============================================================
+# SPARQL Query Annotation — Python Dependencies
+# ============================================================
+#
+# 安装说明 / Installation:
+#   本机 CUDA 12.4, PyTorch 2.6.0+cu124
+#   PyTorch 需从官方源安装以获取 CUDA 支持:
+#     pip install torch --index-url https://download.pytorch.org/whl/cu124
+#   然后再安装其余依赖:
+#     pip install -r requirements.txt
+#
+# ============================================================
+
+# ── Layer 1: 核心 SPARQL 处理 & KB 查询 / Core SPARQL processing & KB queries ──
+anytree>=2.12.0          # SPARQL 语法树构建与遍历 / syntax tree construction & traversal
+networkx>=3.0            # 图结构操作 / graph structure operations
+ply>=3.11                # SPARQL LALR 解析器生成器 / parser generator (awudima)
+pyodbc>=5.0              # Freebase/Wikidata Virtuoso ODBC 查询 / ODBC backend
+SPARQLWrapper>=2.0       # SPARQL HTTP 端点查询 / HTTP backend
+tqdm>=4.65               # 进度条 / progress bars
+zss>=1.2.0               # 树编辑距离 Zhang-Shasha / tree edit distance
+
+# ── Layer 2: QuAD 搜索 + 实体链接 + LLM / Search + entity linking + LLM ──
+func-timeout              # 函数超时控制 / function execution timeout
+nltk>=3.8                 # 分词 & 词性标注 / tokenization & POS tagging
+                          # TODO: 首次使用需下载 nltk 数据 (punkt, averaged_perceptron_tagger)
+openai>=1.0               # GPT API 调用 / GPT-based reranking
+requests>=2.28            # HTTP 请求 / HTTP requests
+sentence-transformers>=3.0  # 语义相似度排序 / semantic similarity ranking
+transformers>=4.40        # HuggingFace 模型加载 / PLM embeddings
+# stanza                   # 仅 unused/ 中旧代码使用，活跃代码无引用 / only used in unused code
+
+# ── Layer 3: 评估 & 可视化 / Evaluation & visualization ──
+matplotlib>=3.7           # 图表绘制 / plotting (manual_annotation_evaluation.py)
+seaborn>=0.12             # 统计可视化 / statistical visualization (manual_annotation_evaluation.py)
+
+# ── 间接依赖 / Indirect dependencies ──
+# 以下包在 src/ 中无直接 import，但被编译/运行时依赖
+numpy>=1.26            # zss C 扩展编译 + torch/transformers/sentence-transformers 运行时依赖

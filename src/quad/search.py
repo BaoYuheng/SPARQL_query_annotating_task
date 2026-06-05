@@ -1,30 +1,27 @@
-import sys
-sys.path.append("/home5/yhbao/SPARQLannotation")
 import math
-from src.simple_graph import SimpleGraph, NodeType, EdgeType, Node, get_attached_graph, rename_node
-from src.semantic_sim_utils import FBEmbeddingBasedSimilarity, PLMSimRanker
-from src.sparql_executor import SparqlOdbcQuerierNoSexpr, SparqlOdbcQuerierNoSexprWikidata
-import re 
+from src.logical_form.simple_graph import SimpleGraph, NodeType, EdgeType, Node, get_attached_graph, rename_node
+from src.linking.semantic_sim import FBEmbeddingBasedSimilarity, PLMSimRanker
+from src.sparql.executor import SparqlOdbcQuerierNoSexpr, SparqlOdbcQuerierNoSexprWikidata
+import re
 import time
-from src.utils import (
+from src.core.utils import (
     load_json, dump_json, setup_custom_logger, flatten_decomposition_tree
 )
-from src.sparql_utils import load_relation_dicts
-from src.s_expression_utils import sexp_to_sparql
-from src.common import (SPARQL_wrapper_path_official, 
-                        KB_TYPE, 
+from src.sparql.sparql_utils import load_relation_dicts
+from src.logical_form.s_expression_utils import sexp_to_sparql
+from src.core.common import (SPARQL_wrapper_path_official,
+                        KB_TYPE,
                         FREEBASE_CONSTANT_TYPE,
                         WIKIDATA_CONSTANT_TYPE,
-                        DATASET,
+                        Dataset, FB_DATASETS,
                         FreebaseConstantForConstruction,
                         WikidataConstantForConstruction,
-                        SPARQL_wrapper_path_dkilab, 
-                        SPARQL_wrapper_path_wikidata_2019, 
-                        SPARQL_wrapper_path_wikidata_2023, 
-                        ODBC_CONFIG_OFFICIAL, 
-                        ODBC_CONFIG_WIKIDATA_2019,
+                        SPARQL_wrapper_path_dkilab,
+                        SPARQL_wrapper_path_wikidata_2023,
+                        ODBC_CONFIG_OFFICIAL,
                         ODBC_CONFIG_WIKIDATA_2023,
-                        ODBC_CONFIG_DKILAB)
+                        ODBC_CONFIG_DKILAB,
+                        DEFAULT_SPARQL_SERVICE)
 import random 
 from queue import Queue
 import itertools
@@ -44,6 +41,14 @@ from tqdm import tqdm
 
 
 def has_token_overlap(sen_1, sen_2):
+    """
+    Check if two sentences have lexical overlap after stopword removal.
+    判断两个句子在去除停用词后是否存在词汇重叠。
+
+    Replaces punctuation with spaces, tokenizes, ignores stopwords,
+    and returns True if any non-stopword token from sen_1 appears in sen_2.
+    将标点替换为空格后分词，忽略停用词，若句1的某个非停用词出现在句2中则返回True。
+    """
     nltk_stop_words = {i:True for i in ["i", "me", "my", "myself", "we", "our", "ours", "ourselves", 
                 "you", "your", "yours", "yourself", "yourselves", "he", "him", 
                 "his", "himself", "she", "her", "hers", "herself", "it", "its", 
@@ -75,7 +80,7 @@ def has_token_overlap(sen_1, sen_2):
         return False
 
 
-#记录问题分解的树状结构
+# 问题分解的树状结构 / Tree node for question decomposition (Sec 5.2 of paper)
 class DecompositionTreeNode:
     def __init__(self, question, index):
         self.this_question = question
@@ -93,9 +98,9 @@ class DecompositionTreeNode:
 class Question:
     def __init__(self, question_text, answers=None, linked_items = None) -> None:
         """
-        question_text：问题文本
-        answer：问题答案，暂时只能是一个实体list，或是数字
-        candidate_entities, relations：候选的关系或实体
+        question_text: 问题文本 / the question text
+        answers: 问题答案（实体列表或数字） / answer entities or numeric values
+        linked_items: 候选的关系或实体 / candidate entities or relations from entity linking
         """
         self.question_text = question_text
         self.candidate_LF = []
@@ -114,7 +119,8 @@ class Question:
 
     def build_subquestions_by_decomposition(self, use_golden_entity):
         '''
-        根据{问题：[依赖的子问题]}来构造问题的分解树
+        Build the decomposition tree from {question: [dependent sub-questions]} dict.
+        根据 {问题: [依赖的子问题]} 字典来构造问题的分解树。 (Sec 5.2)
         '''
 
         def has_overlap(item, question_text_wo_idx):
@@ -137,11 +143,11 @@ class Question:
             subq_text = k
             subq_text_wo_idx = subq_text.split("|")[1]
             subq_answers = self.answers if k.startswith("<OUTQ>") else []
-            if len(self.decompostion_dependency) == 1:    #只有一个子问题，此时应当使用全部的linked items
+            if len(self.decompostion_dependency) == 1:    # 只有一个子问题，使用全部 linked items / only one sub-q, use all linked items
                 subq_linked_items = self.linked_items
             else:
                 if use_golden_entity:
-                    #使用golden entities时，我们不考虑golden entity的mention必须在subq内
+                    # 使用 golden entities 时不要求 mention 在 subq 内 / golden: don't require mention overlap for entities
                     subq_linked_items = [ent for ent in self.linked_items if ent['type'] != "literal"]
                     subq_linked_items += [ent for ent in self.linked_items if ent['type'] == 'literal' and has_overlap(ent, subq_text_wo_idx)]
                 else:
@@ -172,8 +178,8 @@ class Question:
             traverse(root, res)
             return res
         
-        #将某个子问题收缩到上个问题内
-        #先修改树，再重算dict，再按照dict建新树
+        # 将某个子问题收缩到父问题内 / Shrink a sub-question into its parent question (Sec 5.2: top-down decomposition)
+        # 步骤：先修改树→重算dict→按新dict建树 / Steps: modify tree → recompute dict → rebuild tree
         subq_index, subq_text_wo_idx = subq_node_to_shrink.this_question.question_text.split("|")[0], subq_node_to_shrink.this_question.question_text.split("|")[1]
         parent = subq_node_to_shrink.parent_question_decomposition_node
         index = parent.sub_question_decomposition_nodes.index(subq_node_to_shrink)
@@ -187,66 +193,128 @@ class Question:
 
 class LFSearchAlgorithm:
 
-    def __init__(self, dataset:DATASET, log_file_dir, use_golden_entity:bool, use_neighbor_entity:bool, sparql_cache_dir = None):
+    def __init__(self, dataset: Dataset, log_file_dir, use_golden_entity:bool, use_neighbor_entity:bool, sparql_cache_dir = None):
         self.sparql_logger = setup_custom_logger(log_file_dir)
         self.dataset = dataset
-        if dataset == DATASET.GRAIL or dataset == DATASET.CWQ or dataset == DATASET.WEBQ:
+        if dataset in FB_DATASETS:
             self.kb = KB_TYPE.FREEBASE
             SUBQ_GRAPH_MAX_SIZE = 4
-            if dataset == DATASET.GRAIL:
-                self.sparql_executor = SparqlOdbcQuerierNoSexpr(odbc_config=ODBC_CONFIG_DKILAB, sparql_wrapper_path=SPARQL_wrapper_path_dkilab, logger=self.sparql_logger, timeout=6, sparql_cache_dir= sparql_cache_dir)
-            elif dataset == DATASET.WEBQ or dataset == DATASET.CWQ:
-                #20260120 补充实验
-                self.sparql_executor = SparqlOdbcQuerierNoSexpr(odbc_config=ODBC_CONFIG_DKILAB, sparql_wrapper_path=SPARQL_wrapper_path_dkilab, logger=self.sparql_logger, timeout=6, sparql_cache_dir = sparql_cache_dir)
-                # self.sparql_executor = SparqlOdbcQuerierNoSexpr(odbc_config=ODBC_CONFIG_OFFICIAL, sparql_wrapper_path=SPARQL_wrapper_path_official, logger=self.sparql_logger, timeout=6, sparql_cache_dir = sparql_cache_dir)
+            if dataset == Dataset.GRAIL:
+                self.sparql_executor = SparqlOdbcQuerierNoSexpr(
+                    sparql_wrapper_path=SPARQL_wrapper_path_dkilab,
+                    logger=self.sparql_logger,
+                    service=DEFAULT_SPARQL_SERVICE,
+                    odbc_config=ODBC_CONFIG_DKILAB,
+                    timeout=6,
+                    sparql_cache_dir=sparql_cache_dir,
+                )
+                # PR 计算专用 executor：ODBC 的 SELECT COUNT(...) AS ?cnt 返回损坏的整数值
+                # (e.g. 125 万亿 vs 正确值 27388)，导致 F1 全为零。PR 必须走 SPARQLWrapper。
+                self.counting_executor = SparqlOdbcQuerierNoSexpr(
+                    sparql_wrapper_path=SPARQL_wrapper_path_dkilab,
+                    logger=self.sparql_logger,
+                    service="sparql_wrapper",
+                    timeout=6,
+                    sparql_cache_dir=sparql_cache_dir,
+                )
+            elif dataset == Dataset.WEBQ or dataset == Dataset.CWQ:
+                # CWQ / WebQSP 使用 official (8890) 端点，因为 dkilab (8896) 中日期值格式为
+                # "1975-04-30-08:00" (带时区 datetime)，与答案数据中的纯 date 格式
+                # "1975-04-30"^^xsd:date 不匹配，导致时间类问题答案锚定搜索失败。
+                # Official 端点存储纯日期格式，与答案数据一致。
+                # CWQ / WebQSP use official (8890) endpoint because dkilab (8896) stores
+                # dates as "1975-04-30-08:00" (datetime with timezone), which doesn't match
+                # the pure-date answer format "1975-04-30"^^xsd:date, causing answer-anchored
+                # search failures for time-related questions. Official uses pure dates.
+                self.sparql_executor = SparqlOdbcQuerierNoSexpr(
+                    sparql_wrapper_path=SPARQL_wrapper_path_official,
+                    logger=self.sparql_logger,
+                    service=DEFAULT_SPARQL_SERVICE,
+                    odbc_config=ODBC_CONFIG_OFFICIAL,
+                    timeout=6,
+                    sparql_cache_dir=sparql_cache_dir,
+                )
+                # PR 计算专用 executor：ODBC COUNT 损坏，必须走 SPARQLWrapper. 详见 GrailQA 分支注释.
+                self.counting_executor = SparqlOdbcQuerierNoSexpr(
+                    sparql_wrapper_path=SPARQL_wrapper_path_official,
+                    logger=self.sparql_logger,
+                    service="sparql_wrapper",
+                    timeout=6,
+                    sparql_cache_dir=sparql_cache_dir,
+                )
             self.relation_blacklists = ["base.yupgrade", "base.fbontology.", "common.webpage", "freebase.valuenotation"]
             self.FB_time_types = ['type.datetime']
             self.FB_quantity_types = ['type.int', "type.float"]
             self.reverse_relation_dict, self.relation_domain_range_dict = load_relation_dicts()
-            #超参数
-            self.ANSWER_SAMPLE_SIZE = 3 #最多采样多少个答案，用于判断linked item到entity的可达性
-            self.CQV_TO_NQV_CANDIDATE_NUM = 10 #每次从CQV到NQV，筛选最可能的关系topK
-            self.CQV_QUANTITY_R_CANDIDATE_NUM = 5 #保留多少个可能的数量属性
-            self.CQV_TEMPORAL_R_CANDIDATE_NUM = 5 #保留多少个可能的时间属性
-            self.ENTITY_CANDIDATE_NUM = 3
-            self.V_TO_ENTITY_CANDIDATE_NUM = 5 #从变量到候选实体的关系TOPK数量
-            self.SUBQ_GRAPH_MAX_SIZE = 4 #每个子问题的子图最大可能是多大，这里指边数
-            self.SUBQ_CANDIDATE_GRAPHS_NUM_NON_LEAF = 20 #每个非叶子问题的一跳子图的穷举至多返回多少个结果
-            self.SUBQ_CANDIDATE_GRAPHS_NUM_LEAF = 10 #每个叶子问题的一跳子图的穷举至多返回多少个结果
-            #20260121：加以限制
-            self.SUBGRAPH_SEARCH_TIMEOUT = 20 #关系和实体搜索阶段超时限制
-            self.SEARCH_FAIL_TIMEOUT = 120  #整个问题搜索的超时限制
-            self.ENUMERATION_PHASE_TIMEOUT = 10 #枚举阶段时间限制
-            #20260121：不加以限制
-            # self.SUBGRAPH_SEARCH_TIMEOUT = 2000 #关系和实体搜索阶段超时限制
-            # self.SEARCH_FAIL_TIMEOUT = 1200  #整个问题搜索的超时限制
-            # self.ENUMERATION_PHASE_TIMEOUT = 1000 #枚举阶段时间限制
-            self.CQV_MAX_DEG = 2  #CQV最大度数
-            self.SEARCH_TOPK = 10    #最后返回结果TOPK数
+
+            # ============================================================
+            # HYPERPARAMETERS (Freebase) / 超参数 (Freebase)
+            # Tune these to trade off search quality vs. runtime.
+            # ============================================================
+            self.ANSWER_SAMPLE_SIZE = 3               # max answer samples for reachability check / 最多采样答案数
+            self.CQV_TO_NQV_CANDIDATE_NUM = 10        # top-K relations from CQV to NQV / CQV→NQV 候选关系数
+            self.CQV_QUANTITY_R_CANDIDATE_NUM = 5     # top-K quantity properties / 数量属性候选数
+            self.CQV_TEMPORAL_R_CANDIDATE_NUM = 5     # top-K temporal properties / 时间属性候选数
+            self.ENTITY_CANDIDATE_NUM = 3             # max neighbor entities to retain / 邻居实体保留数
+            self.V_TO_ENTITY_CANDIDATE_NUM = 5        # top-K relations from variable to entity / 变量→实体关系 TOPK
+            self.SUBQ_GRAPH_MAX_SIZE = 4              # max edges per sub-question subgraph / 每个子问题子图最大边数
+            self.SUBQ_CANDIDATE_GRAPHS_NUM_NON_LEAF = 20  # beam size for non-leaf sub-questions / 非叶子子问题候选图数
+            self.SUBQ_CANDIDATE_GRAPHS_NUM_LEAF = 10      # beam size for leaf sub-questions / 叶子子问题候选图数
+
+            # 20260121: active timeout limits (see paper Sec 5.3 Implementation) / 启用超时限制
+            self.SUBGRAPH_SEARCH_TIMEOUT = 20    # relation & entity search phase timeout (s) / 搜索阶段超时
+            self.SEARCH_FAIL_TIMEOUT = 120       # whole question search timeout (s) / 整体搜索超时
+            self.ENUMERATION_PHASE_TIMEOUT = 10  # enumeration phase timeout (s) / 枚举阶段超时
+            # 20260121: relaxed limits (commented out) / 宽松限制（已禁用）
+            # self.SUBGRAPH_SEARCH_TIMEOUT = 2000
+            # self.SEARCH_FAIL_TIMEOUT = 1200
+            # self.ENUMERATION_PHASE_TIMEOUT = 1000
+
+            self.CQV_MAX_DEG = 2   # max degree of current question variable / CQV 最大度数
+            self.SEARCH_TOPK = 10  # top-K final results retained / 最终保留结果数
         else:
             self.kb = KB_TYPE.WIKIDATA
-            self.sparql_executor = SparqlOdbcQuerierNoSexprWikidata(odbc_config=ODBC_CONFIG_WIKIDATA_2023, sparql_wrapper_path=SPARQL_wrapper_path_wikidata_2023, logger=self.sparql_logger, timeout=10, sparql_cache_dir=sparql_cache_dir)
-            numeral_p_data = load_json("/home5/yhbao/SPARQLannotation/data/WD_ontology/wikidata_numeral_property_dict.json")
+            self.sparql_executor = SparqlOdbcQuerierNoSexprWikidata(
+                sparql_wrapper_path=SPARQL_wrapper_path_wikidata_2023,
+                logger=self.sparql_logger,
+                service=DEFAULT_SPARQL_SERVICE,
+                odbc_config=ODBC_CONFIG_WIKIDATA_2023,
+                timeout=10,
+                sparql_cache_dir=sparql_cache_dir,
+            )
+            # PR 计算专用 executor：ODBC COUNT 损坏，必须走 SPARQLWrapper. 详见 Freebase 分支注释.
+            self.counting_executor = SparqlOdbcQuerierNoSexprWikidata(
+                sparql_wrapper_path=SPARQL_wrapper_path_wikidata_2023,
+                logger=self.sparql_logger,
+                service="sparql_wrapper",
+                timeout=10,
+                sparql_cache_dir=sparql_cache_dir,
+            )
+            numeral_p_data = load_json("data/WD_ontology/wikidata_numeral_property_dict.json")
             self.WD_quantity_properties_dict = {item['pid']:item for item in numeral_p_data['quantity_properties']}
             self.WD_temporal_properties_dict = {item['pid']:item for item in numeral_p_data['temporal_properties']}
-            self.WD_property2label_dict = load_json("/home5/yhbao/SPARQLannotation/data/WD_ontology/wikidata_property_id2label_dict.json")
+            self.WD_property2label_dict = load_json("data/WD_ontology/wikidata_property_id2label_dict.json")
             self.relation_blacklists = ['P31']
             #self.relation_blacklists = []
-            #超参数
-            self.ANSWER_SAMPLE_SIZE = 3 #最多采样多少个答案，用于判断linked item到entity的可达性
-            self.CQV_TO_NQV_CANDIDATE_NUM = 10 #每次从CQV到NQV，筛选最可能的关系topK
-            self.CQV_QUANTITY_R_CANDIDATE_NUM = 3 #保留多少个可能的数量属性
-            self.CQV_TEMPORAL_R_CANDIDATE_NUM = 3 #保留多少个可能的时间属性
-            self.ENTITY_CANDIDATE_NUM = 3
-            self.V_TO_ENTITY_CANDIDATE_NUM = 5 #从变量到候选实体的关系TOPK数量
-            self.SUBQ_GRAPH_MAX_SIZE = 6#每个子问题的子图最大可能是多大，这里指边数
-            self.SUBQ_CANDIDATE_GRAPHS_NUM_NON_LEAF = 20 #每个非叶子问题的一跳子图的穷举至多返回多少个结果
-            self.SUBQ_CANDIDATE_GRAPHS_NUM_LEAF = 10 #每个叶子问题的一跳子图的穷举至多返回多少个结果
-            self.SUBGRAPH_SEARCH_TIMEOUT = 60 #关系和实体搜索阶段超时限制
-            self.SEARCH_FAIL_TIMEOUT = 180  #整个问题搜索的超时限制
-            self.ENUMERATION_PHASE_TIMEOUT = 60 #枚举阶段时间限制
-            self.CQV_MAX_DEG = 2  #CQV最大度数
-            self.SEARCH_TOPK = 10    #最后返回结果TOPK数
+
+            # ============================================================
+            # HYPERPARAMETERS (Wikidata) / 超参数 (Wikidata)
+            # Tune these to trade off search quality vs. runtime.
+            # ============================================================
+            self.ANSWER_SAMPLE_SIZE = 3               # max answer samples for reachability check / 最多采样答案数
+            self.CQV_TO_NQV_CANDIDATE_NUM = 10        # top-K relations from CQV to NQV / CQV→NQV 候选关系数
+            self.CQV_QUANTITY_R_CANDIDATE_NUM = 3     # top-K quantity properties / 数量属性候选数
+            self.CQV_TEMPORAL_R_CANDIDATE_NUM = 3     # top-K temporal properties / 时间属性候选数
+            self.ENTITY_CANDIDATE_NUM = 3             # max neighbor entities to retain / 邻居实体保留数
+            self.V_TO_ENTITY_CANDIDATE_NUM = 5        # top-K relations from variable to entity / 变量→实体关系 TOPK
+            self.SUBQ_GRAPH_MAX_SIZE = 6              # max edges per sub-question subgraph / 每个子问题子图最大边数
+            self.SUBQ_CANDIDATE_GRAPHS_NUM_NON_LEAF = 20  # beam size for non-leaf sub-questions / 非叶子子问题候选图数
+            self.SUBQ_CANDIDATE_GRAPHS_NUM_LEAF = 10      # beam size for leaf sub-questions / 叶子子问题候选图数
+            self.SUBGRAPH_SEARCH_TIMEOUT = 60    # relation & entity search phase timeout (s) / 搜索阶段超时
+            self.SEARCH_FAIL_TIMEOUT = 180       # whole question search timeout (s) / 整体搜索超时
+            self.ENUMERATION_PHASE_TIMEOUT = 60  # enumeration phase timeout (s) / 枚举阶段超时
+            self.CQV_MAX_DEG = 2   # max degree of current question variable / CQV 最大度数
+            self.SEARCH_TOPK = 10  # top-K final results retained / 最终保留结果数
         self.use_golden_entity = use_golden_entity
         self.use_neighbor_entity = use_neighbor_entity
         self.sentence_bert_ranker = PLMSimRanker(model="BAAI/bge-reranker-v2-m3")
@@ -270,47 +338,44 @@ class LFSearchAlgorithm:
         return parameter_dict
 
     def get_current_graph_PR(self, graph:SimpleGraph, answers):
-        if self.kb == KB_TYPE.WIKIDATA:
-            service = "sparql_wrapper"
-        elif self.kb == KB_TYPE.FREEBASE:
-            #20260120
-            # service = "odbc"
-            service = "sparql_wrapper"
         """
-        将当前的graph转化为SPARQL，并求其执行结果相对于答案集合的Precision与Recall
+        Execute current graph as SPARQL and compute Precision & Recall against answer set.
+        将当前图转为 SPARQL 执行，计算相对于答案集合的 Precision 与 Recall。(Sec 5.3: pruning via monotonic property)
+        Uses self.counting_executor (SPARQLWrapper) because ODBC returns corrupted integer values
+        for SELECT COUNT(...) AS ?cnt queries. / 使用 self.counting_executor，因 ODBC COUNT 返回损坏值.
         """
+        ex = self.counting_executor  # always SPARQLWrapper for correct COUNT values
+
         if graph.count_query:
             sparql = graph.to_sparql_query()
-            results_set = set(self.sparql_executor.get_execution_result_one_variable(sparql, service))
+            results_set = set(ex.get_execution_result_one_variable(sparql))
             assert len(answers) == 1 and "XMLSchema#integer" in answers[0]['mid']
             match = re.search(r'(\d+)', answers[0]['mid'])
             answers_number = int(match.group(1))
             result_number = int(list(results_set)[0])
-            #无法定义recall；只能考虑precision是不断上升的
             if result_number == 0:
                 recall = 0
                 precision = 0
             else:
-                recall = 1              
+                recall = 1
                 precision = answers_number / result_number
         else:
-            if graph.arg_function is None and len(answers) <= 10:      #优化：此时使用技巧来重写SPARQL，能够加快一些
+            if graph.arg_function is None and len(answers) <= 10:
                 p_sparql, r_sparql = graph.to_sparql_query_fast_PR_with_entity_answers(answers)
-                recall = len(set(self.sparql_executor.get_execution_result_one_variable(r_sparql, service))) / len(answers)    #这个值是精确的
-                sparql_result = self.sparql_executor.get_execution_result_one_variable(p_sparql, service)
-                if len(sparql_result) == 0: #这里，只可能是P_SPARQL执行超时
-                    #我们认为这种不合法
-                    recall = 0 
+                recall = len(set(ex.get_execution_result_one_variable(r_sparql))) / len(answers)
+                sparql_result = ex.get_execution_result_one_variable(p_sparql)
+                if len(sparql_result) == 0:
+                    recall = 0
                     precision = 0
                 else:
-                    sparql_result_size = int(list(self.sparql_executor.get_execution_result_one_variable(p_sparql, service))[0])
+                    sparql_result_size = int(list(ex.get_execution_result_one_variable(p_sparql))[0])
                     if sparql_result_size == 0:
                         precision = 0
                     else:
-                        precision = len(answers) / sparql_result_size #这个值可能偏小，但sparql精确时，P的值也是1；而我们只要求P=1时候是对的就行了
+                        precision = len(answers) / sparql_result_size
             else:
                 sparql = graph.to_sparql_query()
-                results_set = set(self.sparql_executor.get_execution_result_one_variable(sparql, service))
+                results_set = set(ex.get_execution_result_one_variable(sparql))
                 answer_mids = set([item['mid'] for item in answers])
                 if len(results_set) == 0:
                     precision = 0
@@ -321,14 +386,12 @@ class LFSearchAlgorithm:
         return precision, recall
 
     def get_current_graph_PR_using_Sexpr(self, graph:SimpleGraph, answers):
-        #对于最后的accurate检验，转成SEXPR再翻译回SPRAQL，增加一些Filter
-        if self.kb == KB_TYPE.WIKIDATA:
-            service = "sparql_wrapper"
-        elif self.kb == KB_TYPE.FREEBASE:
-            service = "odbc"
+        # 已废弃 / Deprecated: 使用 get_current_graph_PR 替代.
+        # 保留以维持向后兼容 / Kept for backward compatibility.
+        # Convert to S-expr then back to SPARQL for accurate check (adds implicit filters) / 转为 S-expr 再转回 SPARQL 增加隐式 Filter
 
         sparql = sexp_to_sparql(str(graph.to_Sexpr()))
-        results_set = self.sparql_executor.get_execution_result_one_variable(sparql, service)        
+        results_set = self.sparql_executor.get_execution_result_one_variable(sparql)        
         answer_mids = set([item['mid'] for item in answers])
         if len(results_set) == 0:
             precision = 0
@@ -370,7 +433,7 @@ class LFSearchAlgorithm:
 
     def get_special_property_type(self, r, KB:KB_TYPE):
         if KB == KB_TYPE.FREEBASE:
-            if "/" in r:    #cvt关系的类型由第二部分决定
+            if "/" in r:    # CVT relation type determined by the second part / CVT 关系类型由第二部分决定
                 r = r.split("/")[1]
             if r in self.relation_domain_range_dict and 'range' in self.relation_domain_range_dict[r]:
                 range = self.relation_domain_range_dict[r]['range']
@@ -385,7 +448,7 @@ class LFSearchAlgorithm:
             else:
                 return "NORMAL"
         elif KB == KB_TYPE.WIKIDATA:
-            #注意，这里都是两跳，同样的，由距离较远的r2决定
+            # Wikidata: 2-hop paths, type determined by r2 / Wikidata 两跳路径，类型由 r2 决定
             r = r.split("/")[1].split(":")[1]
             if r in self.WD_quantity_properties_dict:
                 return "QUANTITY"
@@ -397,7 +460,7 @@ class LFSearchAlgorithm:
             raise Exception("未实现")
 
     def remove_rebundant_tc(self, lf, answers):
-        #检查某个lf在移除tc后，是否结果不变，如果是，移除该lf的tc
+        # Check if removing type constraints keeps results unchanged; if so, drop them / 检查移除 tc 后结果是否不变，是则删除
         tc = lf.type_constraints
         f1_1 = self.get_current_graph_F1(lf, answers)
         lf.type_constraints = []
@@ -407,7 +470,8 @@ class LFSearchAlgorithm:
         return lf
 
     def detect_numeral_triggers_new(self, question_text):
-        #我们只返回3种：COUNT，COMPARE和ARG，具体的比较符号与ARG类型通过穷举来进行
+        # Detect 3 trigger types: COUNT, COMPARE, ARG. Exact operator/arg type determined via enumeration.
+        # 检测 3 种数值触发词：COUNT, COMPARE, ARG。具体比较符号与 ARG 类型通过穷举确定。(Sec 5.3: counting & superlatives)
         corpus_count = ['the count of', 'how many', 'how much', 'amount of', 'what number of', 'total number of', 'the number of', 'quantity of']
         corpus_arg = [' most ', ' first ', ' maximum ', ' minimum ' , ' max ', ' min ']
         corpus_compare = [' at most ', ' equal ', ' after ', ' under ', ' below ', ' within ', ' over ',' at least ', ' exceeds ', ' more ', " before ", " prior "]
@@ -452,7 +516,7 @@ class LFSearchAlgorithm:
             triggers.append("COUNT")
         if len(superlatives) > 0 or len(arg_triggers) > 0:
             triggers.append("ARG")
-        #判断一种特殊情况：
+        # Handle special case: 'least' vs 'at least' / 判断特殊情况：least vs at least
             if len(arg_triggers) == 1 and arg_triggers[0] == 'least' and 'at least' in compare_triggers:
                 triggers.remove("ARG")
         return triggers
@@ -511,9 +575,10 @@ class LFSearchAlgorithm:
             return func
 
 
-    def LF_search_main(self, data_item, dataset:DATASET, only_keep_accurate = False):
+    def LF_search_main(self, data_item, dataset: Dataset, only_keep_accurate = False):
         '''
-        搜索主函数
+        Main search entry point — top-down beam search over the decomposition tree.
+        搜索主函数 — 基于分解树的自顶向下 Beam Search。(Sec 5.3: Query Graph Construction)
         '''
         def init_search_array(question_main):
             nonlocal previous_LFs
@@ -521,13 +586,13 @@ class LFSearchAlgorithm:
             search_array.clear()
             previous_LFs.clear()
             search_array.append(question_main.sub_question_structure)
-            #所有情况下，公共的搜索起点
+            # Common search starting point / 公共搜索起点
             numeral_triggers = self.detect_numeral_triggers_new(question_main.question_text)
-            #不可能同时存在argmin和argmax
+            # ARG and COUNT are mutually exclusive / ARG 与 COUNT 互斥
             assert("ARG" not in numeral_triggers or "COUNT" not in numeral_triggers)
-            #对于COUNT，添加一系列搜索起点
+            # COUNT: add search starting points with type constraints / COUNT: 为每个可能的 type 添加类型限定的搜索起点
             if "COUNT" in numeral_triggers and len(question_main.answers) == 1 and "integer" in question_main.answers[0]['mid']:
-                #为每个可能的type，添加一个用类型限定的查询
+                # Add a type-constrained query for each possible class / 为每个可能的 type 添加类型限定的查询
                 possible_types = [item['mid'] for item in question_main.linked_items if item['type'] == "class"]
                 outq_node = Node("?OUTQ", NodeType.VARIABLE)
                 for type in possible_types:
@@ -535,27 +600,28 @@ class LFSearchAlgorithm:
                     graph.count_query = True
                     graph.add_type_constaint(outq_node, type)
                     previous_LFs.append(graph)
-                #freebase没有number of...属性，但wikidata显然有很多，因此要额外考虑
+                # Freebase lacks "number of" properties, but Wikidata has them / Freebase 没有 number of 属性，Wikidata 有
                 if self.kb == KB_TYPE.WIKIDATA:
                     previous_LFs.append(None)
             else:
                 previous_LFs.append(None)
         question_main = self.built_question_structure(data_item, dataset)
-        #扔掉随机性
+        # Drop randomness: take the first ANSWER_SAMPLE_SIZE answers / 抛弃随机性：取前 ANSWER_SAMPLE_SIZE 个答案
         self.selected_answers = question_main.answers if len(question_main.answers) <= self.ANSWER_SAMPLE_SIZE else question_main.answers[0:self.ANSWER_SAMPLE_SIZE]
         #self.selected_answers = question_main.answers if len(question_main.answers) <= ANSWER_SAMPLE_SIZE else random.sample(question_main.answers, ANSWER_SAMPLE_SIZE)
         self.global_mid2item_dict = {}
-        #分为精确的results(f1 =1 )与不精确的results。优先搜索精确的results，但如果一直搜索不到，当Only_keep_accurate=false的时候，返回F1最高的不精确results中，语义最接近的那个
+        # Separate accurate (F1=1) vs. non-accurate results. Prefer accurate; fallback to highest-F1 non-accurate.
+        # 分离精确结果 (F1=1) 与非精确结果。优先精确结果，否则返回 F1 最高的非精确结果。
         accurate_final_results = []
         nonaccurate_final_results = []
         previous_LFs = []
         search_array = []
-        #按照拓扑序，逐步地求解问题
+        # Solve sub-questions in topological order (BFS-like, top-down) / 按拓扑序自顶向下逐步求解（类 BFS）
         init_search_array(question_main)
         has_arg = "ARG" in self.detect_numeral_triggers_new(question_main.question_text)
         search_terminated = False
         search_begin_time = time.time()
-        #求解差不多是一个BFS，但将子问题收缩时，需要对序列的头（当前要收缩的子问题）进行操作
+        # BFS-like traversal; shrink sub-questions at the head of the queue when backtracking / 类 BFS 遍历，回溯时收缩队首子问题
         while not search_terminated:
             current_subq_node = search_array[0]
             sub_question_id = current_subq_node.index
@@ -567,7 +633,7 @@ class LFSearchAlgorithm:
             temp = []
             for lf1 in previous_LFs:
                 if time.time() - search_begin_time > self.SEARCH_FAIL_TIMEOUT:
-                    self.sparql_logger.info(f"整体搜索用时超过了阈值{str(self.SEARCH_FAIL_TIMEOUT)}，放弃")
+                    self.sparql_logger.info(f"Search timeout exceeded {str(self.SEARCH_FAIL_TIMEOUT)}s, aborting / 总搜索超时，放弃")
                     return [], 0
                 try:
                     subq_LF=self.subquestion_graph_enumeration_with_timeout(subq, lf1, question_main.answers, cqv, nqvs)
@@ -584,15 +650,15 @@ class LFSearchAlgorithm:
             previous_LFs = temp
             if len(previous_LFs) == 0:
                 if current_subq_node.parent_question_decomposition_node is not None:
-                    self.sparql_logger.info("收缩子问题=======================================================================")
+                    self.sparql_logger.info("Shrinking sub-question / 收缩子问题 =======================================================================")
                     question_main.subq_identification(current_subq_node, use_golden_entity=self.use_golden_entity)
                     init_search_array(question_main)
                     search_terminated = False
                     continue
             search_array = search_array[1:]
             if len(search_array) == 0: 
-                self.sparql_logger.info("-------------------目前对问题搜索尝试完成----------------------------------------")
-                #为每个lf枚举ARG
+                self.sparql_logger.info("-------------------Search attempt finished / 搜索尝试完成----------------------------------------")
+                # Enumerate ARG for each LF / 为每个 LF 枚举 ARG (Sec 5.3: superlatives)
                 if has_arg:
                     numeral_neighbor_relations_of_outq = [r for r in self.get_neighbor_relations_with_previous_LF(answers=self.selected_answers, end_point=None, 
                                                                                                       expand_point=Node("?OUTQ", NodeType.VARIABLE), previous_LF=None, question=question_main.question_text)
@@ -605,20 +671,21 @@ class LFSearchAlgorithm:
                 else:
                     last_results = previous_LFs
                 for lf in last_results:
-                    #注意到，最后的sparql中，显然是需要有某个常量作为锚点的，一种额外情况是，没有三元组中的常量，但有arg或比较
-                    if not (lf.no_constant() and lf.arg_function is None and len(lf.comparisons) == 0):  
+                    # Final SPARQL must have at least one constant anchor; exceptions: ARG or comparisons without triple constants
+                    # 最终 SPARQL 需要至少一个常量锚点；例外：有 ARG 或比较但无三元组常量
+                    if not (lf.no_constant() and lf.arg_function is None and len(lf.comparisons) == 0):
                         #self.sparql_logger.info(str(lf))
                         f1 = self.get_current_graph_F1(lf, question_main.answers)
                         if math.isclose(f1, 1):
-                            #考虑删除class：如果有三元组，且删除class后，结果仍然是精确的，那么删除class
+                            # Drop redundant type constraints if result stays accurate / 若删除 class 后仍精确则删除
                             if len(lf.edges) > 0:
                                     accurate_final_results.append(self.remove_rebundant_tc(lf, question_main.answers))
                             else:
-                                #没有edge而有tc，此时不能删除tc，否则就没有三元组了
+                                # No edge but has TC: cannot remove TC (would leave no triple) / 没有 edge 而有 tc，不能删除
                                 accurate_final_results.append(lf)
                         else:
-                            if not only_keep_accurate:#只有在不仅仅保存精确结果的情况下，才需要记录非精确的结果
-                                #我们只保存当前f1最高的结果
+                            if not only_keep_accurate:# Only track non-accurate when not requiring accuracy / 仅在不要求精确时才记录非精确结果
+                                # Keep only the highest-F1 results / 只保存当前 F1 最高的结果
                                 if len(nonaccurate_final_results) == 0:
                                     nonaccurate_final_results.append((self.remove_rebundant_tc(lf, question_main.answers), f1))
                                 else:
@@ -629,21 +696,21 @@ class LFSearchAlgorithm:
                                         nonaccurate_final_results.clear()
                                         nonaccurate_final_results.append((self.remove_rebundant_tc(lf, question_main.answers), f1))
                 if len(accurate_final_results) == 0 and current_subq_node.parent_question_decomposition_node is not None:
-                    self.sparql_logger.info("收缩子问题=======================================================================")
+                    self.sparql_logger.info("Shrinking sub-question / 收缩子问题 =======================================================================")
                     question_main.subq_identification(current_subq_node, self.use_golden_entity)
-                    init_search_array(question_main) 
+                    init_search_array(question_main)
                     search_terminated = False
                 else:
                     search_terminated = True
         final_results = []
         highest_f1 = 0
         if len(accurate_final_results) > 0:
-            #如果有精确的结果，那么自然只保存精确的结果，且基于语义排序
+            # Accurate results: keep all, rank by semantic similarity / 精确结果：保留并基于语义排序 (Sec 5.3: final selection)
             highest_f1 = 1
             accurate_final_results = self.get_current_graph_sim_top_k(accurate_final_results, question_main.question_text, self.global_mid2item_dict, top_k = self.SEARCH_TOPK)
             final_results = accurate_final_results
         else:
-            #否则，考虑F1最高的结果，也基于语义排序
+            # Fallback: rank highest-F1 non-accurate results by semantic similarity / 回退：对最高 F1 非精确结果基于语义排序
             if not only_keep_accurate and len(nonaccurate_final_results) > 0:
                 highest_f1 = nonaccurate_final_results[0][1]
                 results_with_highest_f1 = [item[0] for item in nonaccurate_final_results]
@@ -716,7 +783,7 @@ class LFSearchAlgorithm:
                 #     return None
 
         def get_natural_relation_rep_wikidata(r):
-            #主语宾语扔了吧没用
+            # Subject and object labels not used here / 主语宾语标签在此不适用
             if "/" in r:
                 r1, r2 = r.split("/")[0].split(":")[1], r.split("/")[1].split(":")[1]
                 r1_label = self.WD_property2label_dict[r1]
@@ -754,7 +821,7 @@ class LFSearchAlgorithm:
                 for item in neighbor_relations:
                     if "/" in item:
                         r1, r2 = item.split("/")[0], item.split("/")[1]
-                        #有一种情况需要排除：r1和r2是反转的
+                        # Exclude when r1 and r2 are mutual inverses / r1和r2互为反转的情况排除
                         if r1 == "^" + r2 or r2 == "^" + r1:
                             continue 
                         in_black_list = False
@@ -830,7 +897,7 @@ class LFSearchAlgorithm:
             #如果正向和逆向的邻接关系都为空，那么我们认为end_point到answers此时不可达，返回[]
             if len(relations) == 0:
                 return []
-            #在这里，进行分类
+            # 在这里分类 / Classify candidate relations here
             candidate_relation_list = []
             for r in list(relations):
                 candidate_relation_list.append({"relation":r,  "type":self.get_special_property_type(r, self.kb)})
@@ -839,7 +906,7 @@ class LFSearchAlgorithm:
             return candidate_relation_list
         
         elif self.kb == KB_TYPE.WIKIDATA:
-            #最大的区别是，WD关系都是按照两跳考虑；同时不考虑逆关系
+            # WD relations are 2-hop without inverse consideration / WD 关系按两跳考虑，不考虑逆关系
             relations = set()
             if answers is None:
                 neighbor_relations = self.sparql_executor.expand_next_hop_path_with_LF(LF = previous_LF, expand_point = expand_point, \
@@ -886,7 +953,7 @@ class LFSearchAlgorithm:
             #如果邻接关系都为空，那么我们认为end_point到answers此时不可达，返回[]
             if len(relations) == 0:
                 return []
-            #在这里，进行分类
+            # 在这里分类 / Classify candidate relations here
             candidate_relation_list = []
             for r in list(relations):
                 candidate_relation_list.append({"relation":r, "type":self.get_special_property_type(r, self.kb)})
@@ -963,7 +1030,8 @@ class LFSearchAlgorithm:
 
         def subquestion_graph_enumeration(current_sub_question, previous_LF:SimpleGraph, answers, cqv:Node, nqvs:list[Node]):
             def is_wdt(p):
-                #判断关系是不是形如p:Pxxxx/ps:Pxxxx 或 ^ps:Pxxxx/^p:Pxxxx
+                # Check if relation follows Wikidata truthy pattern: p:Pxxx/ps:Pxxx or ^ps:Pxxx/^p:Pxxx
+                # 判断关系是否符合 Wikidata truthy 模式
                 p_1, p_2 = p.split("/")[0], p.split("/")[1]
                 prefix_1, pid_1 = p_1.split(":")[0], p_1.split(":")[1]
                 prefix_2, pid_2 = p_2.split(":")[0], p_2.split(":")[1]
@@ -971,11 +1039,13 @@ class LFSearchAlgorithm:
                     return True
                 else:
                     return False
-            #穷举子问题对应的子图
-            #每个问题均有一个中心变量，称为current question variable（CQV)，注意到，答案的利用就是第一个子问题的CQV的取值是已知的（非count问题）
-            #除了最后一个子问题，CQV都要连到下一个问题对应的中心变量上，称下一个问题的中心变量为next question variable(NQV)
-            #需要引入超时；经过实验，使用func_timeout会导致segmentation fault（多线程）。因此用time简单手写
-            #从外层函数共享的搜索结果，和mid到item的dict
+
+            # Enumerate subgraphs for the current sub-question. / 穷举当前子问题对应的子图。
+            # Each sub-question centers on a Current Question Variable (CQV). For the root sub-q,
+            # CQV values are known from answers (non-COUNT). Non-leaf CQVs connect to Next Question
+            # Variables (NQVs). / CQV 为当前子问题中心变量，根子问题的 CQV 取值由答案已知。非叶 CQV 需连接到 NQV。
+            # Timeout via manual checks (func_timeout causes segfault with multi-threading). / 手动超时检查（func_timeout 导致多线程 segfault）。
+            # Shared from outer scope: candidate_sub_question_LFs and mid2item_dict / 共享外层变量。
             nonlocal candidate_sub_question_LFs
             nonlocal mid2item_dict
             start_time = time.time()
@@ -983,19 +1053,19 @@ class LFSearchAlgorithm:
             sub_question_text = "|".join(current_sub_question.question_text.split("|")[1:])
             subquestion_text_with_idx = sub_question_index + " is " + sub_question_text
             leaf_question = len(nqvs) == 0
-            #数值触发检测，在枚举子图时加入比较与ARG
+            # Numeral trigger detection for comparisons and ARG during enumeration / 数值触发检测，用于枚举比较和 ARG
             #numeral_triggers = self.detect_numeral_triggers(sub_question_text, current_sub_question.linked_items)
             numeral_triggers = self.detect_numeral_triggers_new(sub_question_text)
-            #COUNT我们已放在搜索的外层处理
+            # COUNT is handled at the outer search level / COUNT 已在外层搜索处理
             #arg_triggers = [trigger for trigger in numeral_triggers if trigger == "ARG"]
             comparison_triggers = [trigger for trigger in numeral_triggers if trigger == "COMPARE"]
             # arg_triggers = [trigger for trigger in numeral_triggers if trigger == "ARGMIN" or trigger == "ARGMAX"]
             # comparison_triggers = [trigger for trigger in numeral_triggers if trigger == ">=" or trigger == "<=" or trigger == "<" or trigger == ">"]
             #assert(len(arg_triggers) <= 1 and len(comparison_triggers) <= 2)
-            #在包含下一个子问题，或者是包含数值trigger时，需要探测CQV旁边的属性信息
+            # Explore CQV neighborhood when there is a next sub-question or numeral trigger / 有下一个子问题或数值 trigger 时探测 CQV 邻居
             if not leaf_question or (len(comparison_triggers) > 0):
                 if previous_LF is not None and previous_LF.count_query:
-                    #如果是COUNT类查询，不存在实体类型的答案约束
+                    # COUNT queries have no entity-type answer constraint / COUNT 查询无实体类型答案约束
                     cqv_neighbor_relations = self.get_neighbor_relations_with_previous_LF(answers=None, previous_LF=previous_LF, end_point=None,
                                                                                     expand_point=cqv, question=sub_question_text)
                 else:
@@ -1003,8 +1073,9 @@ class LFSearchAlgorithm:
                                                                                     expand_point=cqv, question=sub_question_text)
             if not leaf_question:
                 assert(len(nqvs)) <= 2
-                #穷举从CQV到NQV的可能结构，称为骨架
-                #我们默认，只有答案变量可能是数量，其他qv都是实体；那么，仅当答案是数量，且该Neighbor为逆向时，允许数值属性
+                # Enumerate skeleton structures from CQV to NQV / 穷举从 CQV 到 NQV 的骨架结构
+                # Default: only answer variable can be numeric; QVs are entities. Only allow numeric properties when answer is numeric.
+                # 默认：仅答案变量可为数量；其他 QV 为实体。仅当答案是数量时允许数值属性。
                 if previous_LF is None:
                     if self.kb == KB_TYPE.FREEBASE:
                         if FreebaseConstantForConstruction.get_constant_type(answers[0]['mid']) == FREEBASE_CONSTANT_TYPE.TIME:
@@ -1023,15 +1094,15 @@ class LFSearchAlgorithm:
                 else:
                     cqv_neighbor_relations_possible_cqv2nqv = [item for item in cqv_neighbor_relations if item['type'] == "NORMAL"]
                 if self.kb == KB_TYPE.WIKIDATA:
-                    #我们对WIKIDATA，有以下判断：必须是cqv p:x/ps:x nqv 或反之
+                    # Wikidata: CQV→NQV must follow truthy pattern cqv p:x/ps:x nqv or reverse / Wikidata 必须是 p:x/ps:x 模式
                      cqv_neighbor_relations_possible_cqv2nqv = [item for item in cqv_neighbor_relations_possible_cqv2nqv if is_wdt(item['relation'])]
                 cqv_to_nqv_candidate_relations = []
                 for nqv in nqvs:
                     top_candidate_relation_of_this_nqv = self.get_ranked_relations(cqv_neighbor_relations_possible_cqv2nqv, subquestion_text_with_idx, self.CQV_TO_NQV_CANDIDATE_NUM,
                                                                             str(cqv), str(nqv))
                     cqv_to_nqv_candidate_relations.append([(nqv, item) for item in top_candidate_relation_of_this_nqv])
-                    #整理为num_nqv个list，使用product穷举
-                self.sparql_logger.info(f"可能的CQV到NQV关系: {str(cqv_to_nqv_candidate_relations)}")
+                    # Gather into num_nqv lists, enumerate with product / 收集为多个 list，使用 product 穷举
+                self.sparql_logger.info(f"Candidate CQV→NQV relations / 候选 CQV→NQV 关系: {str(cqv_to_nqv_candidate_relations)}")
                 possible_cqv_to_nqv_structures = []
                 for r_combination in itertools.product(*cqv_to_nqv_candidate_relations):
                     graph = SimpleGraph(cqv, ground_kb=self.kb)
@@ -1056,16 +1127,15 @@ class LFSearchAlgorithm:
             else:
                 graph_only_cqv = SimpleGraph(cqv, ground_kb=self.kb)
                 possible_cqv_to_nqv_structures = [graph_only_cqv]
-            #断点1：如果搜索CQV旁边的内容时超时
-            if time.time() - start_time > self.SUBGRAPH_SEARCH_TIMEOUT: 
-                self.sparql_logger.info("子图搜索超时：在搜索CQV周围关系时超时")
+            # Checkpoint 1: timeout during CQV neighborhood search / 断点1：搜索 CQV 邻居超时
+            if time.time() - start_time > self.SUBGRAPH_SEARCH_TIMEOUT:
+                self.sparql_logger.info("Subgraph search timeout: CQV neighbor search / 子图搜索超时：CQV 邻居关系搜索")
                 return
-            #然后，将常量连接到这个骨架上
+            # Attach constants (entities, literals, classes) to the skeleton / 将常量连接到骨架上
             candidate_classes = [item for item in current_sub_question.linked_items if item['type'] == "class"]
             candidate_literals = [item for item in current_sub_question.linked_items if item['type'] == "literal"]
             candidate_entities = [item for item in current_sub_question.linked_items if item['type'] == "entity"]
-            #首先，需要确定哪些类型是可以用于约束CQV的
-            #我们目前只考虑用类型来限制?OUTQ
+            # Determine usable class types for CQV constraint (currently only for ?OUTQ) / 确定可约束 CQV 的类型（目前仅 ?OUTQ）
             usable_classes = []
             if previous_LF is None: 
                 for cls in candidate_classes:
@@ -1080,7 +1150,7 @@ class LFSearchAlgorithm:
                     struct.add_type_constaint(cqv, class_used)
                     temp.append(struct)
                 possible_cqv_to_nqv_structures = temp
-            ##首先在候选字面量和实体中筛选出一跳内可以到达cqv的
+            # Filter literals and entities reachable from CQV within one hop / 筛选一跳内可达 CQV 的字面量和实体
             candidate_constant_dict = {}
             for item in candidate_entities + candidate_literals:
                 mid2item_dict[item['mid']] = item
@@ -1092,13 +1162,13 @@ class LFSearchAlgorithm:
                                                                                     question=subquestion_text_with_idx, previous_LF=previous_LF)
                 if len(cqv_to_item_relations) > 0:
                     candidate_constant_dict[item['mid']] = self.get_ranked_relations(cqv_to_item_relations, subquestion_text_with_idx, self.V_TO_ENTITY_CANDIDATE_NUM, str(cqv), item['label'])
-                #断点2：如果搜索实体相关内容时超时
-                if time.time() - start_time > self.SUBGRAPH_SEARCH_TIMEOUT: 
-                    self.sparql_logger.info("子图搜索超时：在检索实体链接结果的邻居关系时超时")
+                # Checkpoint 2: timeout during entity neighbor search / 断点2：搜索实体邻居超时
+                if time.time() - start_time > self.SUBGRAPH_SEARCH_TIMEOUT:
+                    self.sparql_logger.info("Subgraph search timeout: entity neighbor search / 子图搜索超时：实体邻居关系搜索")
                     return
-            #如果是叶子节点，加入当前CQV的邻居实体来增强实体链接
+            # Leaf node: augment entity linking with neighbor entities of CQV / 叶子节点：加入 CQV 的邻居实体增强链接 (Sec 5.3: Exploration)
             if leaf_question and self.use_neighbor_entity:
-                #如果使用类型，这里检索邻居节点是不现实的！
+                # Neighbor retrieval is impractical with type constraints / 使用类型约束时检索邻居节点不现实
                 if previous_LF is not None and previous_LF.count_query:
                     pass
                 else:
@@ -1119,9 +1189,9 @@ class LFSearchAlgorithm:
                     if len(neighbor_entities) > self.ENTITY_CANDIDATE_NUM:
                         entity_sim_topk = self.sentence_bert_ranker.get_semantic_sim_topk(sub_question_text, [item['label'] for item in neighbor_entities], self.ENTITY_CANDIDATE_NUM)
                         neighbor_entities = [item for item in neighbor_entities if item['label'] in entity_sim_topk]
-                    #断点1：如果搜索CQV旁边的内容时超时
-                    if time.time() - start_time > self.SUBGRAPH_SEARCH_TIMEOUT: 
-                        self.sparql_logger.info("图搜索超时：在搜索邻居实体时超时")
+                    # Checkpoint: timeout during neighbor entity search / 断点：搜索邻居实体超时
+                    if time.time() - start_time > self.SUBGRAPH_SEARCH_TIMEOUT:
+                        self.sparql_logger.info("Subgraph search timeout: neighbor entity search / 图搜索超时：邻居实体搜索")
                         pass
                     else:
                         neighbor_entity_dict = {}
@@ -1139,15 +1209,16 @@ class LFSearchAlgorithm:
                                                                                         self.V_TO_ENTITY_CANDIDATE_NUM, str(cqv), item['label'])
                                 neighbor_entity_dict[item['mid']] = cqv_to_ent_relations
                                 mid2item_dict[item['mid']] = item
-                            if time.time() - start_time > self.SUBGRAPH_SEARCH_TIMEOUT: 
-                                self.sparql_logger.info("子图搜索超时：在枚举邻居实体的可能关系时超时")
+                            if time.time() - start_time > self.SUBGRAPH_SEARCH_TIMEOUT:
+                                self.sparql_logger.info("Subgraph search timeout: enumerating neighbor entity relations / 子图搜索超时：枚举邻居实体关系")
                                 break
                         candidate_constant_dict.update(neighbor_entity_dict)
-            self.sparql_logger.info(f"可能的邻接实体与关系: {str(candidate_constant_dict)}")
-            #枚举可能链接到骨架上的实体结构
-            cvt_constant_structures = []    #由两个实体组成的cvt结构
-            single_constant_stuctures = []  #由一个实体组成的结构（包含CVT）
-            #记录单个实体的结构，包含CQV-ent与CQV--CVT--ent
+            self.sparql_logger.info(f"Candidate neighbor entities & relations / 候选邻接实体与关系: {str(candidate_constant_dict)}")
+
+            # Enumerate constant (entity/literal) structures attachable to skeleton / 枚举可链接到骨架的常量结构
+            cvt_constant_structures = []    # CVT structure with two entities / 由两个实体组成的 CVT 结构
+            single_constant_stuctures = []  # Single-entity structure (may include CVT) / 单实体结构（可能含 CVT）
+            # Structures: CQV--entity and CQV--CVT--entity / 结构类型：CQV-实体 与 CQV-CVT-实体
             for mid in candidate_constant_dict.keys():
                 if mid2item_dict[mid]['type'] == 'literal':
                     const_node = Node(mid, NodeType.LITERAL)
@@ -1156,7 +1227,7 @@ class LFSearchAlgorithm:
                 else:
                     raise Exception("Unknown type")
                 for rel in candidate_constant_dict[mid]:
-                    #对于wikidata，我们只考虑这种方式的single_constant_stucture：p/ps 或^ps/^p
+                    # Wikidata: only allow truthy pattern (p/ps or ^ps/^p) for single-constant structures / Wikidata 仅允许 p/ps 或 ^ps/^p 模式
                     if self.kb == KB_TYPE.WIKIDATA:
                         if not is_wdt(rel['relation']):
                             continue
@@ -1169,14 +1240,14 @@ class LFSearchAlgorithm:
                         graph.attach_node(cqv, cvt_r1, temp_cvt, direction_r1)
                         graph.attach_node(temp_cvt, cvt_r2, const_node, direction_r2)
                     else:
-                    #WD都拆分成两跳；这里的?cvt其实是statement node
+                    # Wikidata: split into 2-hop; ?cvt here is the statement node / WD 拆分为两跳，?cvt 为 statement node
                         direction_r = "in" if rel['relation'].startswith("^") else "out"
                         r = rel['relation'].strip("^")
                         graph.attach_node(cqv, r, const_node, direction_r)
                     single_constant_stuctures.append(graph)
             cvt_single_constant_structures = [item for item in single_constant_stuctures if len(item.get_cvt_nodes()) > 0]
-            #有一种可能是，CQV--CVT, CVT---ent1, ..., CVT---entx(x>1)。
-            #这种情况，我们只考虑2个组成的。
+            # Possible multi-entity CVT: CQV--CVT, CVT---ent1, ..., CVT---entX (X>1). Only consider pairs (X=2).
+            # 多实体 CVT 情况：只考虑两个实体组成的 CVT。
             for mid1, mid2 in itertools.combinations(candidate_constant_dict.keys(), 2):
                 for r1 in candidate_constant_dict[mid1]:
                     if "/" in r1['relation']:
@@ -1209,7 +1280,7 @@ class LFSearchAlgorithm:
                                     else:
                                         struct.attach_node(temp_cvt, r22, node2, "out")
                                     cvt_constant_structures.append(struct)
-            #枚举可能的COMPARISION结构。
+            # Enumerate possible COMPARISON structures / 枚举可能的比较结构 (Sec 5.3: Enumeration)
             possible_comparisons = []
             if len(comparison_triggers) > 0:
                 top_quantity_relation_labels = self.sentence_bert_ranker.get_semantic_sim_topk(subquestion_text_with_idx, 
@@ -1240,25 +1311,26 @@ class LFSearchAlgorithm:
                             if WikidataConstantForConstruction.get_constant_type(l['mid']) == WIKIDATA_CONSTANT_TYPE.TIME:
                                 for comparison_operator in ['>=', ">", "<=", "<"]:
                                     possible_comparisons.append({"property":r, "operator":comparison_operator, "value": l['mid'],"convert_to_year":False})
-                            #对于Wikidata标注实验，需要处理年份的比较
+                            # Wikidata annotation experiment: year comparison handling / Wikidata 标注实验需要处理年份比较
                             # if WikidataConstantForConstruction.is_legal_year(l['mid']):
                             #     for comparison_operator in ['>=', ">", "=", "<=", "<"]:
                             #         possible_comparisons.append({"property":r, "operator":comparison_operator, "value": l['mid'], "convert_to_year":True})
-            #对子图进行穷举
+            # Begin subgraph enumeration / 开始子图穷举
             enumeration_start_time = time.time()
             for skeleton in possible_cqv_to_nqv_structures:
                 possible_structures_phase1 = []
                 possible_structures_phase2 = []
                 possible_structures_phase3 = []
-                self.sparql_logger.info(f"穷举 {str(skeleton)}")
-                #1、常量结构链接到CQV上
-                self.sparql_logger.info("枚举常量连接情况=======================================================================")
+                self.sparql_logger.info(f"Enumerating / 穷举 {str(skeleton)}")
+                # Phase 1: attach constant structures to CQV / 阶段1：常量结构链接到 CQV
+                self.sparql_logger.info("Phase 1: enumerating constant attachments / 枚举常量连接情况 ==============================================================")
                 illegal_stucture_sets = []
                 possible_structures_phase1.append(skeleton)
                 if skeleton.get_deg(cqv) < self.CQV_MAX_DEG:
                     entities_set_max_size = self.CQV_MAX_DEG - skeleton.get_deg(cqv) + 1
                     for size in range(1, entities_set_max_size):
-                        #注意到一个事实：如果某个常量结构S的集合使得骨架加上S后不是合法的候选，那么包含S的其他集合也不可能是合法的候选，利用这个进行部分的剪枝
+                        # Pruning: if a constant set S makes the skeleton illegal, any superset of S is also illegal.
+                        # 剪枝：若常量集合 S 使骨架不合法，则包含 S 的超集也不合法。
                         for relation_set in itertools.combinations(cvt_constant_structures + single_constant_stuctures, size):
                             legal = True
                             for item in illegal_stucture_sets:
@@ -1275,34 +1347,34 @@ class LFSearchAlgorithm:
                             else:
                                 if len(test_graph.edges) <= self.SUBQ_GRAPH_MAX_SIZE:
                                     possible_structures_phase1.append(test_graph)
-                                    self.sparql_logger.info(f"一个合法结构: {str(test_graph)}")
-                            if time.time() - enumeration_start_time > self.ENUMERATION_PHASE_TIMEOUT: 
-                                self.sparql_logger.info("子图搜索超时：在穷举可能子图phase1时超时")
-                                #尝试保留第一阶段的结果
+                                    self.sparql_logger.info(f"Legal structure / 合法结构: {str(test_graph)}")
+                            if time.time() - enumeration_start_time > self.ENUMERATION_PHASE_TIMEOUT:
+                                self.sparql_logger.info("Subgraph search timeout: phase 1 enumeration / 子图搜索超时：阶段1穷举")
+                                # Try to preserve phase 1 results / 尝试保留第一阶段结果
                                 # candidate_sub_question_LFs += possible_structures_phase1
                                 return
-                #2、常量结构链接到SKELETON中的某个CVT上
-                #穷举目前，单个实体的CVT结构能够链接到skeleton上的情况
+                # Phase 2: attach constant structures to CVT nodes in the skeleton / 阶段2：常量结构链接到骨架中的 CVT 节点
+                # Enumerate: single-entity CVT structures that can attach to skeleton CVT nodes / 穷举可链接到骨架 CVT 的单实体 CVT 结构
                 possible_cvt_entity_attachment = {}
                 for cvt_node in skeleton.get_cvt_nodes():
                     star_in_skeleton = skeleton.get_cvt_star(cvt_node)
                     assert(len(star_in_skeleton) == 2)
-                    #讨论skeleton中的cvt结构，需要考虑cvt的方向问题
+                    # Analyze CVT direction in skeleton / 分析骨架中 CVT 方向
                     cqv2cvt_edge_in_skeleton = [item for item in star_in_skeleton if item['to'] == cqv or item['from'] == cqv][0]
                     cqv2cvt_reversed_in_skeleton = cqv2cvt_edge_in_skeleton['to'] == cqv
                     for cvt_struct in cvt_single_constant_structures:
                         star_in_struct = cvt_struct.get_cvt_star(cvt_struct.get_cvt_nodes()[0])
                         assert(len(star_in_struct) == 2)
-                        #讨论entity cvt struct中的cvt结构，需要考虑cvt的方向问题
+                        # Analyze CVT direction in entity CVT struct / 分析实体 CVT 结构方向
                         cqv2cvt_edge_in_struct = [item for item in star_in_struct if item['to'] == cqv or item['from'] == cqv][0]
                         cqv2cvt_reversed_in_struct = cqv2cvt_edge_in_struct['to'] == cqv
                         cvt2nqv_edge_in_struct = [item for item in star_in_struct if item['to'] != cqv and item['from'] != cqv][0]
                         cvt2nqv_reversed_in_struct = cvt2nqv_edge_in_struct['to'].value.startswith("?cvt")
-                        #要求：有相同的边，而且方向相同
+                        # Require: same edge and same direction / 要求：相同边且方向一致
                         if cqv2cvt_edge_in_skeleton['edge'] == cqv2cvt_edge_in_struct['edge'] and cqv2cvt_reversed_in_skeleton == cqv2cvt_reversed_in_struct:
-                            #测试：连接上之后是否合法？
+                            # Test: is the attachment legal? / 测试连接后是否合法
                             if not cvt2nqv_reversed_in_struct:
-                                #检查：这条边是不是已经存在
+                                # Check: does this edge already exist? / 检查边是否已存在
                                 exist = False
                                 for edgeitem in test_graph.edges:
                                     if edgeitem['edge'] == cvt2nqv_edge_in_struct['edge'] and edgeitem['from'] == cvt_node and edgeitem['to'] == cvt2nqv_edge_in_struct['to']:
@@ -1322,32 +1394,32 @@ class LFSearchAlgorithm:
                                     test_graph.attach_node(cvt_node, cvt2nqv_edge_in_struct['edge'], cvt2nqv_edge_in_struct['from'], 'in')
                                     if self.legal_candidate(test_graph, answers, prev_graph=previous_LF):
                                         possible_cvt_entity_attachment[cvt_node]=((cvt_node, cvt2nqv_edge_in_struct['edge'], cvt2nqv_edge_in_struct['from'], 'in'))
-                        if time.time() - enumeration_start_time > self.ENUMERATION_PHASE_TIMEOUT: 
-                                self.sparql_logger.info("子图搜索超时：在穷举可能子图phase2时超时")
-                                #尝试保留第一阶段的结果
+                        if time.time() - enumeration_start_time > self.ENUMERATION_PHASE_TIMEOUT:
+                                self.sparql_logger.info("Subgraph search timeout: phase 2 enumeration / 子图搜索超时：阶段2穷举")
+                                # Try to preserve phase 1 results / 尝试保留第一阶段结果
                                 # candidate_sub_question_LFs += possible_structures_phase1
                                 return
                 for struct in possible_structures_phase1:
                     possible_structures_phase2.append(struct)
                     for k, v in possible_cvt_entity_attachment.items():
                         node, edge, ent, direction = v[0], v[1], v[2], v[3]
-                        if ent in struct.nodes:   #规定：已经在图中的实体不能再次被用来约束CVT
+                        if ent in struct.nodes:   # An entity already in the graph cannot constrain CVT again / 已在图中的实体不能再次约束 CVT
                             continue
-                        else:                   #暂时假定只能放一个
+                        else:                   # Temporarily assume only one can be placed / 暂时假定只能放一个
                             test_graph = deepcopy(struct)
                             test_graph.attach_node(node, edge, ent, direction)
                             if len(test_graph.edges) <= self.SUBQ_GRAPH_MAX_SIZE and self.legal_candidate(test_graph, answers, prev_graph=previous_LF):
-                                self.sparql_logger.info(f"一个合法结构: {str(test_graph)}")
+                                self.sparql_logger.info(f"Legal structure / 合法结构: {str(test_graph)}")
                             possible_structures_phase2.append(test_graph)
-                #如果没有探测到比较trigger，在这里已经结束了
+                # If no comparison trigger detected, end here / 未探测到比较 trigger，在此结束
                 if len(comparison_triggers) == 0:
                     candidate_sub_question_LFs += possible_structures_phase2
                     continue
-                #3、添加数值比较约束
-                self.sparql_logger.info("枚举比较类型约束=======================================================================")
+                # Phase 3: add numeric comparison constraints / 阶段3：添加数值比较约束 (Sec 5.3: comparisons)
+                self.sparql_logger.info("Phase 3: enumerating comparison constraints / 枚举比较类型约束 ==============================================================")
                 phase_ended = False
                 for struct in possible_structures_phase2:
-                    #这里添加一个要求，即：不考虑那些没有类型约束，也没有边的图
+                    # Skip graphs with no type constraints and no edges / 跳过无类型约束且无边图
                     if len(struct.nodes) == 1 and len(struct.type_constraints) == 0:
                         continue 
                     possible_structures_phase3.append(struct)
@@ -1356,44 +1428,43 @@ class LFSearchAlgorithm:
                             cmp_r1, cmp_r2 = cmp['property'].split("/")[0], cmp['property'].split("/")[1]
                             cmp_r1_reversed = cmp_r1.startswith("^")
                             cmp_r1 = cmp_r1.strip("^")
-                            #一种情况是，当前Skeleton中有可以连接上去的cvt；此时将r2接上去就可以
+                            # Case 1: skeleton has a matching CVT; attach r2 to it / 情况1：骨架中有匹配的 CVT，将 r2 接上
                             linked_to_cvt = False
                             for cvt_node in struct.get_cvt_nodes():
                                 star_in_struct = struct.get_cvt_star(cvt_node)
                                 #assert(len(star_in_struct) == 2)
-                                #讨论skeleton中的cvt结构，需要考虑cvt的方向问题
+                                # Analyze CVT direction in skeleton / 分析骨架中 CVT 方向
                                 cqv2cvt_edge_in_struct = [item for item in star_in_struct if item['to'] == cqv or item['from'] == cqv][0]
                                 cqv2cvt_reversed_in_struct = cqv2cvt_edge_in_struct['to'] == cqv
                                 cvt2nxt_edgeitems_in_struct = [item['edge'] for item in star_in_struct if item['to'] != cqv and item['from'] != cqv]
                                 if cqv2cvt_edge_in_struct['edge'] == cmp_r1 and cmp_r1_reversed == cqv2cvt_reversed_in_struct:
-                                    #要求：此时被cmp的数值属性不能已经被确定
+                                    # Requirement: the compared numeric property must not be already determined / 要求：被比较的数值属性不能已确定
                                     if cmp_r2.strip("^") in cvt2nxt_edgeitems_in_struct:
                                         continue
                                     else:
                                         test_graph = deepcopy(struct)
-                                        #对于arg函数中关系的方向，我们在转为SPARQL时再处理
-                                        #有问题
+                                        # Direction of the property in ARG function is handled during SPARQL conversion / ARG 关系中方向在转 SPARQL 时处理
                                         test_graph.comparisons.append({"node":cvt_node, "property":cmp_r2, "operator":cmp['operator'], "value":cmp["value"]})
                                         if self.legal_candidate(test_graph, answers, previous_LF):
                                             linked_to_cvt = True
-                                            self.sparql_logger.info(f"一个合法结构: {str(test_graph)}")
+                                            self.sparql_logger.info(f"Legal structure / 合法结构: {str(test_graph)}")
                                             possible_structures_phase3.append(test_graph)
-                            #第二种情况是：没有这个cvt；那么，我们需要创造一个两跳的arg，并链接到cqv上
+                            # Case 2: no matching CVT; create a 2-hop comparison linked to CQV / 情况2：无匹配 CVT，创建链接到 CQV 的两跳比较
                             if not linked_to_cvt:
                                 test_graph = deepcopy(struct)
                                 test_graph.comparisons.append({"node":cqv, "property":cmp['property'], "operator":cmp['operator'], "value":cmp["value"]})
                                 if self.legal_candidate(test_graph, answers, previous_LF):
-                                    self.sparql_logger.info(f"一个合法结构: {str(test_graph)}")
+                                    self.sparql_logger.info(f"Legal structure / 合法结构: {str(test_graph)}")
                                     possible_structures_phase3.append(test_graph)
                         else:
                             if cmp['property'] not in [edge['edge'] for edge in struct.edges]:
                                 test_graph = deepcopy(struct)
                                 test_graph.comparisons.append({"node":cqv, "property":cmp['property'], "operator":cmp['operator'], "value":cmp["value"]})
                                 if self.legal_candidate(test_graph, answers, previous_LF):
-                                    self.sparql_logger.info(f"一个合法结构: {str(test_graph)}")
+                                    self.sparql_logger.info(f"Legal structure / 合法结构: {str(test_graph)}")
                                     possible_structures_phase3.append(test_graph)
-                        if time.time() - enumeration_start_time > self.ENUMERATION_PHASE_TIMEOUT: 
-                            #记录此时结果，跳过此阶段
+                        if time.time() - enumeration_start_time > self.ENUMERATION_PHASE_TIMEOUT:
+                            # Save current results, skip this phase / 记录此时结果，跳过此阶段
                             possible_structures_phase3 = list(set(possible_structures_phase3).union(possible_structures_phase2))
                             phase_ended = True
                             break
@@ -1401,7 +1472,7 @@ class LFSearchAlgorithm:
                         break
                 candidate_sub_question_LFs += possible_structures_phase3
         
-        self.sparql_logger.info(f"从 {str(previous_LF)} 出发，处理 {current_sub_question.question_text}")
+        self.sparql_logger.info(f"Processing from / 从 {str(previous_LF)} 出发，处理 {current_sub_question.question_text}")
         try:
             subquestion_graph_enumeration(current_sub_question, previous_LF, answers, cqv, nqvs)
         except Exception as e:
@@ -1412,8 +1483,8 @@ class LFSearchAlgorithm:
         sub_question_index = sub_question_text = current_sub_question.question_text.split("|")[0]
         sub_question_text = "|".join(current_sub_question.question_text.split("|")[1:])
         subquestion_text_with_idx = sub_question_index + " is " + sub_question_text
-        if leaf_question:   #如果是叶子节点，至少需要CQV上链接有某些内容
-            for lf in candidate_sub_question_LFs:   
+        if leaf_question:   # Leaf nodes must have at least some content attached to CQV / 叶子节点必须在 CQV 上有内容
+            for lf in candidate_sub_question_LFs:
                 if len(lf.nodes) == 1 and lf.arg_function is None and len(lf.comparisons) == 0 and len(lf.type_constraints) == 0:
                     candidate_sub_question_LFs.remove(lf)
         subquestion_text_with_idx = sub_question_index + " is " + sub_question_text
@@ -1430,11 +1501,13 @@ class LFSearchAlgorithm:
     def built_question_structure(self, question_item, dataset):
         def get_decomposition_dependency(decomposition):
             '''
-            按照分解，建立sub_questions的拓扑结构
-            输出是一个dict，记录每个子问题问题的入边
+            Build sub-question topological structure from decomposition. Output is a dict of in-edges.
+            按照分解建立子问题的拓扑结构。输出 dict 记录每个子问题的入边。
 
-            现有的分解考虑了并列描述与子问题，但我们的框架只处理子问题，因而对并列描述进行合并
-            采用递归的方法：如果当前处理的List长度大于1，那么拼接起来
+            The decomposition may contain conjunctive descriptions alongside sub-questions;
+            our framework only handles sub-questions, so conjunctive descriptions are merged.
+            Recursive: if current list length > 1, concatenate descriptions.
+            分解可能同时含并列描述与子问题；框架仅处理子问题，因此合并并列描述。递归合并。
             '''
             def join_conjunctive_descriptions(current):
                 if len(current) > 1:
@@ -1452,7 +1525,8 @@ class LFSearchAlgorithm:
             
             def recursively_rebuild_decompostion(current, k):
                 """
-                调用join_conjunctive_descriptions来合并并列的描述。同时，为每个子问题的描述前面添加问题编号，便于后续使用
+                Merge conjunctive descriptions and prepend sub-question index for downstream use.
+                调用 join_conjunctive_descriptions 合并并列描述，并为每个子问题描述前添加问题编号。
                 """
                 current = join_conjunctive_descriptions(current)
                 current['description'] = k+"|"+current['description']
@@ -1465,7 +1539,7 @@ class LFSearchAlgorithm:
             def recursively_built_dependency_dict(current):
                 nonlocal dependency_dict
                 dependency_dict[current['description']] = []
-                if len(current) == 1:   #最下层的子问题，只有descrition而没有依赖的子问题
+                if len(current) == 1:   # Leaf sub-question: only description, no dependent sub-questions / 最底层子问题，仅有 description
                     return
                 else:
                     for k, v in current.items():
@@ -1474,7 +1548,7 @@ class LFSearchAlgorithm:
                             recursively_built_dependency_dict(v)
 
 
-            rebuilt_decompostion = recursively_rebuild_decompostion(decomposition, "<OUTQ>")    #最外层的编号为<OUTQ>
+            rebuilt_decompostion = recursively_rebuild_decompostion(decomposition, "<OUTQ>")    # Root level index is <OUTQ> / 最外层编号为 <OUTQ>
             recursively_built_dependency_dict(rebuilt_decompostion)
             return dependency_dict
 
@@ -1482,11 +1556,11 @@ class LFSearchAlgorithm:
         answers = question_item['answer']
         linked_items = []
         if self.use_golden_entity:
-            #使用golden的class与entity
+            # Use golden classes and entities / 使用 golden 的 class 与 entity
             for item in question_item['golden_grounded_items']:
                 if item['type'] == "class":
                     if self.kb == KB_TYPE.FREEBASE:
-                        #Freebase class label就是mid
+                        # Freebase class label is the mid / Freebase class label 就是 mid
                         item['label'] = item['mid']
                     else:
                         item['label'] = question_item['golden_item_to_label'][item['mid']]
@@ -1495,7 +1569,7 @@ class LFSearchAlgorithm:
                 # if self.kb == KB_TYPE.WIKIDATA:
                 #     item['mid'] = "wd:" + item['mid'] if not item['mid'].startswith("wd:") else item['mid']
                 linked_items.append(item)
-            #但仍然使用探测到的Literal
+            # Still use detected literals / 但仍然使用探测到的 literal
             if len(question_item['linked_item_list']) > 0:
                 if isinstance(question_item['linked_item_list'][0], list):
                     for source in question_item['linked_item_list']:
@@ -1509,7 +1583,7 @@ class LFSearchAlgorithm:
                             item['label'] = question_item['linked_item_to_label'][item['mid']]
                             linked_items.append(item)
         else:
-            #为linked_items附加上label
+            # Attach labels to linked_items / 为 linked_items 附加上 label
             if len(question_item['linked_item_list']) > 0:
                 if isinstance(question_item['linked_item_list'][0], list):
                     for source in question_item['linked_item_list']:
@@ -1534,9 +1608,9 @@ class LFSearchAlgorithm:
                         else:
                             item['label'] = question_item['linked_item_to_label'][item['mid']]
                         linked_items.append(item)
-        if dataset == DATASET.GRAIL:
+        if dataset == Dataset.GRAIL:
             temp = []
-            #需要处理年份、月份与日份
+            # Handle year, month, and day literal formats / 需要处理年份、月份与日份格式
             for item in linked_items:
                 if "#dateTime" in item['mid'] or "#date" in item['mid']:
                     match_y = re.search(r'(\d{4})', item['mid'])
@@ -1560,7 +1634,7 @@ class LFSearchAlgorithm:
         try:
             question.decompostion_dependency = get_decomposition_dependency(decomposition)
         except:
-            #此时分解出错；我们只能采取将整个问题不分解的方法
+            # Decomposition failed; fallback to treating the whole question as a single unit / 分解出错，回退为不分解整个问题
             self.sparql_logger.error(traceback.format_exc())
             question.decompostion_dependency = {f"<OUTQ>|{question_item['question']}":[]}
             pass
@@ -1583,10 +1657,10 @@ class LFSearchAlgorithm:
                 res, f1 = self.LF_search_main(item, self.dataset, only_keep_accurate = only_keep_accurate)
                 if len(res) > 0:
                     find_cnt += 1
-                    self.sparql_logger.info("搜索结果")
+                    self.sparql_logger.info("Search results / 搜索结果")
                     for r in res:
                         self.sparql_logger.info(str(r))
-                    self.sparql_logger.info(f"搜索结果F1: {str(f1)}")
+                    self.sparql_logger.info(f"Search result F1 / 搜索结果 F1: {str(f1)}")
                 else:
                     fail_questions.append(item)
                 result_list = []
@@ -1615,4 +1689,3 @@ class LFSearchAlgorithm:
         if self.sparql_executor.cached_results is not None:
             self.sparql_executor.write_current_cache_to_file()
         return results, fail_questions
-

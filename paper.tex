@@ -1,0 +1,672 @@
+% This is samplepaper.tex, a sample chapter demonstrating the
+% LLNCS macro package for Springer Computer Science proceedings;
+% Version 2.21 of 2022/01/12
+%
+\documentclass[runningheads]{llncs}
+%
+\usepackage[T1]{fontenc}
+% T1 fonts will be used to generate the final print and online PDFs,
+% so please use T1 fonts in your manuscript whenever possible.
+% Other font encondings may result in incorrect characters.
+%
+% \usepackage{times}
+\usepackage{latexsym}
+\usepackage{amsmath}
+\usepackage{amsfonts,amssymb,bm}
+\usepackage{stmaryrd} 
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{adjustbox}
+\usepackage{orcidlink}
+% This is also not strictly necessary, and may be commented out.
+% However, it will improve the aesthetics of text in
+% the typewriter font.
+\usepackage{inconsolata}
+\usepackage{marvosym}
+\usepackage{hyperref}
+
+% 我们补充的
+\usepackage{multirow,booktabs} 
+\usepackage{graphicx}
+%\usepackage{algo}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+% Used for displaying a sample figure. If possible, figure files should
+% be included in EPS format.
+%
+% If you use the hyperref package, please uncomment the following two lines
+% to display URLs in blue roman font according to Springer's eBook style:
+%\usepackage{color}
+%\renewcommand\UrlFont{\color{blue}\rmfamily}
+%\urlstyle{rm}
+%
+\begin{document}
+%
+\title{SQA: SPARQL Query Annotating with Question-Answer Pairs}
+
+
+\author{Yuheng Bao\orcidlink{0009-0003-7718-2594} \and Wenhao Zhou\orcidlink{0009-0008-1545-1732} \and Xuan Wu\orcidlink{0000-0001-8209-5741} \and Wei Hu\orcidlink{0000-0003-3635-6335} \and \\ Dingkun Xu\orcidlink{0009-0002-2176-810X} \and Mingjia Qian\orcidlink{0009-0002-7690-4471} \and Yuzhong Qu\textsuperscript{(\Letter)}\orcidlink{0000-0003-2777-8149}}
+\authorrunning{Y. Bao et al.}
+\institute{
+    State Key Lab for Novel Software Technology, Nanjing University, Nanjing, China \\
+    \email{yhbao@smail.nju.edu.cn, whzhou@smail.nju.edu.cn, xwu@smail.nju.edu.cn,  whu@nju.edu.cn, dkxu@smail.nju.edu.cn, mjqian@smail.nju.edu.cn, yzqu@nju.edu.cn}
+}
+
+
+\maketitle              % typeset the header of the contribution
+%
+\begin{abstract}
+Semantic parsing-based methods for knowledge base question answering have achieved leading performance, but rely on high-quality training data of question-SPARQL query pairs, which requires substantial manual effort.
+In contrast, question-answer pairs are much easier to obtain.
+In this paper, we propose a novel task, namely SPARQL Query Annotating (SQA), to automatically construct queries with given question-answer pairs.
+We propose a novel metric test suite score for the evaluation of this task, and collect a dataset ReQuMA to evaluate this task's facilitation on manual annotation.
+We also present QuAD, a Question-Answer Driven method for this task.
+Our experiments show that the task effectively eases manual annotation, and helps semantic parsing-based KBQA methods to maintain competitive performance when using the constructed queries from QuAD as training data. Analysis shows our test suite score metric effectively reflects the quality of constructed queries. Meanwhile, the substantial performance of QuAD demonstrates its effectiveness as a dedicated SQA method. Our code is available at \url{https://github.com/nju-websoft/SQA}.
+
+
+\keywords{SPARQL Query Annotating \and Knowledge Base Question Answering \and Semantic Parsing.}
+\end{abstract}
+%
+%
+%
+\section{Introduction}
+Knowledge Base Question Answering (KBQA) serves as a user-friendly way to query over Knowledge Bases (KBs).
+Semantic Parsing-based (SP-based) methods \cite{berant2013semantic} are a mainstream KBQA paradigm that parses natural language questions into logical forms, particularly SPARQL \cite{perez2009semantics} queries\footnote{The term \textit{queries} in the following text refers to SPARQL queries by default.} in the KBQA scenario. Among them, fine-tuned SP-based methods utilize question-query pairs to train language models, outperforming other methods on KBQA datasets but heavily relying on high-quality training data.
+However, obtaining high-quality question-query pairs is a challenging task requiring substantial manual effort, which impedes the training of these methods.
+
+Compared to question-query pairs, question-answer pairs can be obtained at a lower cost.
+There are many sources of such data on the internet, like search engine logs and Q\&A platforms.
+Furthermore, it is easier to derive a question's answer from common sense or internet resources than to construct its corresponding query, which requires expert knowledge of the KB.
+In fact, numerous existing datasets, such as HotpotQA \cite{yang2018hotpotqa}, contain real-world question-answer pairs or annotated answers for real questions.
+
+Therefore, we propose the SPARQL Query Annotating (\textbf{SQA}) task, which automatically annotates SPARQL queries from given question-answer pairs.
+This task can provide effective hints for the target SPARQL query for manual query annotation, facilitating the acquisition of high-quality training data for fine-tuned SP-based methods. Additionally, the output of this task can serve as simulated training data for these methods, allowing the training of these methods without manual-annotated queries.
+ 
+Regarding task evaluation, inspired by semantic accuracy measurements on SQL queries \cite{zhong2020semanticsql}, we propose a novel metric, Test Suite Score (TSS). It measures the quality of constructed queries by the consistency of their execution results with gold-standard queries under various perturbations applied to the queries.
+Current KBQA datasets can be leveraged to evaluate the task. Moreover, we collect \textbf{ReQuMA} (Real Questions for Manual Annotation) dataset to better evaluate the assistance of the task in manual annotation.
+
+We also present \textbf{QuAD}, a Question-Answer Driven method tailored for the task.
+QuAD starts from the target variable corresponding to the answers and performs a beam search for the query, following the ideas of existing staged query generation methods \cite{bao2016constraint,lan2020qgg,yih2015semantic}.
+Yet, a key limitation of these approaches is the vast search space.
+To tackle the large search space, QuAD leverages answers to serve as guidance for exploration, pruning, and verification.
+It also leverages the structural and semantic information of the question, incorporates question decomposition to determine the high-level query structure, and ranks contents based on semantic similarity.
+
+
+Our experiments demonstrate the effectiveness of these proposals. In summary, our main contributions are as follows:
+\begin{itemize}
+    \item We propose the SQA task to automatically annotate SPARQL queries from question-answer pairs, aiming to mitigate the bottleneck of SP-based KBQA methods.
+    \item We introduce TSS, a novel metric evaluating the quality of constructed queries via execution consistency, and collect the ReQuMA dataset to benchmark the task's facilitation on manual annotation.
+    \item We present QuAD, a dedicated answer-driven SQA method that effectively leverages answers to prune the vast query search space.
+\end{itemize} 
+
+The rest of this paper is organized as follows: Section \ref{sec:related_works} introduces related work about the paper. Section \ref{sec:task_and_metric} proposes the SQA task, presents the TSS metric, and introduces the ReQuMA dataset. Section \ref{sec:methods} presents the QuAD method. Section \ref{sec:experiment} details our experiments. Section \ref{sec:conclusion} concludes the paper.
+
+\section{Related Work}\label{sec:related_works}
+
+\noindent{\textbf{KBQA Methods}}.
+Existing KBQA methods can be roughly categorized into Semantic Parsing-based (SP-based) methods and Information Retrieval-based (IR-based) methods. 
+
+SP-based methods parse natural language questions into formal queries, which are then executed against the KB to get the answer.
+Mainstream SP-based methods leverage question-SPARQL query pairs as supervision signals. Among them, \textit{fine-tuned SP-based methods} utilize question-SPARQL query pair corpora to fine-tune language models to perform semantic parsing \cite{gu2023pangu,hu2022gmt,shu2022tiara,ye2022rng}.% or to guide \cite{gu2023pangu} the search of the query. 
+% Mainstream SP-based methods leverage question-SPARQL query pairs as supervision signals. Among them, \textit{fine-tuned SP-based methods} utilize question-SPARQL query pair corpora to fine-tune language models to directly generate \cite{hu2022gmt,shu2022tiara,ye2022rng} or to guide \cite{gu2023pangu} the search of the query. 
+With the emergence of Large Language Models (LLMs), several \textit{few-shot SP-based methods} have been proposed. They use exemplars to instruct LLMs to perform semantic parsing \cite{huang2024queryagent,jiang2025kgagent,li2023binder}. 
+Some \textit{staged query generation methods} use question-answer pairs as weak supervision signals \cite{lan2020qgg,yih2015semantic}. They start from topic entities and generate the query graph step by step, performing beam search for queries.
+
+IR-based methods \cite{ding2024epr,jiang2023reasoningLM,luo2023reasoning} first collect relevant information from the KB, then perform reasoning for the answer, rather than generating a query.
+
+% IR-based methods \cite{ding2024epr,jiang2023reasoningLM,luo2023reasoning} begin by collecting relevant information from the KB, such as retrieving a subgraph or traversing on the KB, then perform reasoning to get the answer directly rather than generating a query.
+
+Nevertheless, fine-tuned SP-based methods with high-quality question-query pairs achieve state-of-the-art (SoTA) performance.
+However, they encounter the challenges of collecting query annotations from natural sources.
+
+% Annotation of KBQA datasets.
+\noindent{\textbf{Annotating Approaches in KBQA}}.
+There are two mainstream annotating approaches for KBQA datasets. 
+The first one collects questions from natural sources and annotates corresponding SPARQL queries manually. However, this is extremely labor-intensive and struggles with complex queries involving multiple hops and constraints.
+The second approach \cite{wang2015building} first generates queries paired with canonical utterances, and transforms the utterances into natural language via crowd-powered paraphrasing. 
+However, this approach may result in an artificial question distribution \cite{talmor2018web}.
+Therefore, we argue that an automatic SPARQL query annotating method, which assists annotators in efficiently annotating queries for freely collected questions, is urgently needed.
+
+Although such methods are currently lacking, few-shot SP-based methods and staged query generation methods can be adopted for the task, since they do not need question-SPARQL query pairs to train.
+However, they face the challenges of the huge search space and lack of guidance during the search \cite{chen2022outlining}.
+% The step-by-step search leads to error propagation and accumulation, where an early error may result in subsequent failure.
+% ICL-based methods also face a large search space when generating query drafts.
+QuAD, as a dedicated SPARQL query annotating method, utilizes answers to guide and prune the search of the query, therefore mitigating these challenges.
+
+\noindent{\textbf{Quality Measurements of Structured Queries}}.
+Although systematic studies of quality measurement of SPARQL queries are lacking, similarity measurements may be leveraged for this assessment. These measurements focus on structural similarity. Early works consider string similarity \cite{morsey2011sparqlbenchmark}.
+Recent works formulate SPARQL queries as graphs and consider graph similarity; some further consider KG embedding distance \cite{wang2020similaritysearch} or mined semantic equivalent instances \cite{zheng2016similaritysearch}.
+However, structure-based similarity is inherently affected by semantic equivalent instances due to their prevalence in the SPARQL query language. 
+
+Alternatively, in the databases field, some work on SQL quality measurements approximates the semantic accuracy of SQL queries \cite{zhong2020semanticsql} via execution consistency. 
+% In a different way, a line of studies on SQL quality measurements in the databases field approximates the semantic accuracy of SQL queries \cite{zhong2020semanticsql} using fuzzing techniques \cite{lemieux2018perffuzz,padhye2019semantic}. 
+% They generate and select random databases with element replacements to form the test suite, then check the semantic accuracy of SQL queries by the consistency of execution results with gold-standard queries.
+They generate and select random databases to form the test suite, then check the semantic accuracy of SQL queries by the consistency of execution results with gold-standard queries.
+Our test suite score metric also assesses equivalence by execution consistency. However, we collect possible perturbations on SPARQL queries rather than generating random databases as our test suites.
+
+\section{Task, Metrics and Dataset}\label{sec:task_and_metric}
+% Compared with annotating queries, answers can be annotated without expert knowledge on the KB \cite{berant2013semantic}, and can be further bound to the KB with auxiliary tools.
+
+\subsection{The SPARQL Query Annotating Task}
+
+\noindent\textbf{Task Formulation.}
+Given a question $q$ and its answer $a$ in natural language and the KB $\mathcal{K}$, 
+a method for the SPARQL Query Annotating (SQA) task, namely an \textit{SQA method}, constructs and outputs a SPARQL query $s$ that interprets the intention of $q$ and whose execution result reflects $a$ on $\mathcal{K}$.
+We assume every given $q$ is answerable via $\mathcal{K}$, and thus a gold-standard query $s_g$ (hereafter referred to as \textit{golden queries}) exists to evaluate the quality of $s$.
+Regarding entity linking\footnote{In this paper, entities, classes, and literals are collectively referred to as entities.}, which maps the entities $e$ in the question and the answers $a$ to entities on the KB (denoted by $\mathcal{E}$ and $\mathcal{A}$, respectively), we assume linking tools should be used, although gold-standard linking results can be introduced for comparison purposes.
+
+\noindent\textbf{The Difference Between SQA and SP.}
+Compared to the ordinary semantic parsing (SP) task, the SQA task introduces the answers $a$ (which infers $\mathcal{A}$) to the question $q$. The premise is that 1) QA pairs $(q, a)$ are relatively easy to obtain, while 2) $\mathcal{A}$ provides critical constraints that refine query parsing accuracy.
+
+
+\subsection{Metrics}\label{subsec:metrics}
+
+The quality of constructed query $s$ is measured based on its degree of equivalence to the golden query $s_g$.
+To quantify this equivalence, we propose a novel metric called \textit{Test Suite Score} (TSS), which relies on execution results.
+Additionally, the existing Tree Edit Distance (TED) metric can be used to assess equivalence by structural similarity. 
+In this subsection, we will first introduce the idea and definition of TSS, then describe our TED implementation. A comparative analysis of both metrics is presented in Section \ref{sec:experiment}.
+% We propose a novel test suite score metric to quantify semantic equivalence between queries. Additionally, following previous work, the Tree Edit Distance (TED) metric can also be used to evaluate the SQA task, which assesses structural similarity between queries. 
+
+\noindent \textbf{Test Suite Score (TSS).} 
+TSS is inspired by \cite{zhong2020semanticsql}, where the authors generate random databases as test suites and evaluate the semantic accuracy of SQL queries by comparing execution results on the test suites. 
+% TSS follows this approach of execution result-based evaluation. 
+However, due to the scale and complexity of KBs, it is computationally expensive to generate random KB subgraphs as test suites for SPARQL queries. Therefore, we use perturbations applied to the queries to form test suites.
+% We now discuss the idea and definition of the TSS. To measure the semantic equivalence of $s$ to $s_g$, inspired by test suite accuracy approach \cite{zhong2020semanticsql} in the databases field, we propose the \textit{Test Suite Score} (TSS) metric to assess semantic equivalence based on execution results.
+% Existing similarity approaches focus on calculating structural similarity and face challenges in measuring semantic similarity, which is difficult to address exhaustively.
+% Inspired by the works in the databases field, we propose the metric \textit{test suite score}, measuring semantic equivalence directly based on execution results.
+The core intuition behind TSS is that \textit{equivalent queries should have the same results after the same perturbation}. The degree of consistency across multiple perturbations measures their extent of equivalence. 
+In this paper, we focus on one type of perturbation, entity replacement, which substitutes entities with others from the KB.
+
+For illustration, we begin with the example in Fig.\ref{fig:new_test_suite_generation}. Both the golden query and the constructed query have the same answer (number of \textit{1}), but their semantics are different. The question and the golden query describe \textit{nationality}, whereas the constructed query describes \textit{place of death}. After we replace the entity \textit{Malta} with another entity like \textit{Brazil} in both queries, their results will differ. 
+
+
+\textbf{Definition}.
+Let $s_1$ and $s_2$ be two SPARQL queries, and let $\mathcal{E}_{s_1}$ and $\mathcal{E}_{s_2}$ be the sets of entities occurring in them, respectively. Their \textit{overlapping entities} are defined as $\mathcal{E}_O = \mathcal{E}_{s_1} \cap \mathcal{E}_{s_2}$.
+% Let $s_1$ and $s_2$ be two queries. Their \textit{overlapping entities} $\mathcal{E}_O$ are entities that occur in both $s_1$ and $s_2$. 
+A \textit{perturbation} $t$ is defined as a replacement mapping from overlapping entities to the entities on the KB: $\mathcal{E}_O \rightarrow \mathcal{E}_{\mathcal{K}}$, 
+% \begin{gather}
+%     \mathcal{E}_O = \mathcal{E}_{s_1} \cap \mathcal{E}_{s_2} \\
+%     % t = \{ i \rightarrow x \mid i \in I_{c}, x \in \mathcal{K} \}
+%     t \colon \mathcal{E}_O \rightarrow \mathcal{E}_{\mathcal{K}}
+% \end{gather}
+where $\mathcal{E}_{\mathcal{K}}$ denotes the set of entities on the KB. 
+
+% Let $s$ be a query and $t$ be a perturbation. The \textit{perturbed query} $s[t]$ is the result of applying $t$ to $s$, i.e., replacing $e_O$ with $e_\mathcal{K}$ in $s$ for every $(e_O, e_\mathcal{K}) \in t$. The execution result of $s[t]$ against $\mathcal{K}$ is denoted as:
+For a query $s_i \in \{s_1, s_2\}$ and a perturbation $t$, the \textit{perturbed query} $s_i[t]$ is the result of applying $t$ to $s_i$, i.e., replacing $e_O$ with $e_\mathcal{K}$ in $s_i$ for every $(e_O, e_\mathcal{K}) \in t$. The execution result of $s_i[t]$ against $\mathcal{K}$ is denoted as:
+
+\begin{gather}
+F(s_i, t) = \llbracket s_i [t] \rrbracket_\mathcal{K}
+\end{gather}
+
+The \textit{test suite} $T$ is constructed by collecting all perturbations $t$ that yield non-empty results for either query:
+\begin{gather}
+T = \{ t \mid F(s_1, t) \neq \emptyset  \lor  F(s_2, t) \neq \emptyset \}
+\end{gather}
+
+To obtain such perturbations, for each query $s_i$, we abstract the overlapping entities $\mathcal{E}_O$ as variables to get $s'_i$, then execute $s'_i$ on $\mathcal{K}$ to obtain the possible values for variables. These values represent perturbations for $s_i$ yielding non-empty results. 
+Consider the example in Fig.\ref{fig:new_test_suite_generation} again. We first identify the overlapping entities \textit{Malta} and \textit{film director}, then abstract them into variables in each query and execute the abstracted queries to find perturbations forming the test suite. 
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.9\linewidth]{tss_overview.pdf}
+    \caption{The overview of our TSS metric. Each row of the test suite $T$ is a different perturbation $t$. The execution result $?x_i$ for each query after applying the perturbation $t$ is the output of $F(s_i,t)$. (Const. Query: Constructed Query.)}
+    \label{fig:new_test_suite_generation}
+    \vspace{-1.5em}
+\end{figure}
+%Alt text
+%A diagram illustrating the Test Suite Score (TSS) metric process for evaluating SPARQL query semantic equivalence. The top shows a Natural Language Question compared against a Golden Query (describing nationality) and a Constructed Query (describing place of death). A "Test Suite T" table shows multiple perturbations where overlapping entities like "Malta" and "film director" are replaced with different entity pairs (e.g., Brazil/actor, France/writer). For each perturbation, the execution results of both queries are compared. The diagram demonstrates that while original queries might return the same answer (1), they produce different results under perturbations, allowing for a Jaccard similarity-based TSS calculation.
+
+Finally, we calculate the Jaccard similarity \cite{Jaccard1912THEDO} of the execution results of $s_1$ and $s_2$ against $\mathcal{K}$ under the same perturbation $t$ for each $t$ in the test suite $T$. We use the average of the Jaccard similarities across $T$ as the TSS:
+
+\begin{gather}
+\text{TSS}(s_1, s_2) = \frac{1}{|T|}\sum_{t\in T}  J(F(s_1, t),F(s_2, t))
+\end{gather}
+where $J(\cdot)$ denotes Jaccard similarity between sets. If no valid perturbations exist (i.e., $|T| = 0$), the TSS is simply defined as $0$. The quality of the constructed query $s$ is measured by $\text{TSS}(s, s_g)$ between it and the golden query $s_g$.
+
+\textbf{Implementation.}
+In our current implementation, we restrict the scope of evaluation to queries with a single projected variable (or \texttt{COUNT}), consistent with the scope of QuAD and existing KBQA datasets. 
+Regarding the overlapping items, we consider entities in triple patterns and numerical values that appear only in filters. 
+Because abstracting these isolated numerical literals into variables lacks meaningful SPARQL context, we instead randomly sample three values as their perturbations.
+To ensure efficiency, rather than executing the query for each perturbation individually, we convert all overlapping items in the triple patterns into projected variables ($?e_1$ and $?e_2$ in Fig. \ref{fig:new_test_suite_generation}) alongside the target variable (\texttt{COUNT}(\texttt{DISTINCT} $?x_1$)). Executing this abstracted query against the KB retrieves the complete mapping from perturbations to execution results in a single query.
+When evaluating QuAD's output on 1,000 samples per dataset (Table \ref{table:sparql_query_construction2}), this strategy yields an average TSS computation runtime of 3.3s (CWQ), 5.8s (WebQSP), and 1.1s (GrailQA) per question, respectively.
+
+\noindent\textbf{Implementation of Tree Edit Distance (TED).}
+To better measure the TED in our scenario, we first parse the query into a syntax tree\footnote{We use the parser in \url{https://github.com/keme686/SPARQLParser}}, then perform syntax tree canonicalization to handle cases of semantic equivalence as follows:
+1) We deduplicate the triple patterns and filters, and reorder them in lexicographical order following the practice proposed in \cite{salas2022semantics}.
+2) We add an inversion for each triple pattern whose relation has an inverse,
+and add implicit type constraints based on the domain and range of the relation.
+% As shown in Figure \ref{fig:ontology_related_canonicalization}, we add the triple pattern with inverse relation during canonicalization. Additionally, we supplement the implicit type constraint on variable $?x$ expressed by the domain of the relation \textit{games\_on\_platform}.
+% There are different writings of SPARQL queries, which express the same or similar semantics.
+3) We consider expression variances to the best of our ability. 
+%SPARQL queries can be expressed in different ways while conveying the same or similar semantics.
+For example, queries in the GrailQA dataset introduce a grounded entity using a \texttt{ValuesClause}, e.g., \texttt{VALUES ?x1 \{:m.099p5k\}}.
+We then calculate the TED between canonicalized syntax trees. The cost for insertion, deletion, and substitution between different nodes is set equally to 1. 
+%(i.e., nodes with different labels) is set equally to 1.
+
+
+\subsection{Dataset} \label{subsec:dataset_discussion}
+Current KBQA datasets can be used to evaluate the completion of the SQA task, as they provide questions, answer entities, and golden queries.
+They can also be used to evaluate KBQA models' performance with simulated training data. 
+However, they are not suitable for evaluating the task's assistance in manual annotation, since many of these datasets start from generated queries, their questions' phrasing is somewhat awkward.
+
+To better evaluate the assistance of the task on manual annotation, we collect a dataset consisting of \textit{Real Questions for Manual Annotation}, namely \textit{ReQuMA}, on Wikidata \cite{vrandevcic2014wikidata}. ReQuMA is built based on two existing QA datasets, HotpotQA \cite{yang2018hotpotqa}, which contains complex manual-generated questions, and NQ-open \cite{lee2019latent}, which primarily consists of simple questions derived from search logs.
+% We filter out questions whose answers correspond to Wikidata entities and have fewer than three answers, then annotated their golden queries. This results in a dataset of 200 examples, 100 from each dataset, each containing a question, its answer, and the golden query. 
+
+We first filter questions from the HotpotQA and NQ-open validation sets, retaining only those with KBQA-style answers by excluding: 1) yes/no answers, 2) answers not linkable to Wikidata, and 3) questions with over three answers. After performing entity linking on the selected questions, two experts randomly sample the questions to verify answerability via Wikidata, writing corresponding golden queries. 
+We keep only questions whose expert-validated queries return consistent answers on both the official and local Wikidata 2023 endpoints \footnote{We use the same Wikidata 2023 dump as \cite{huang2023markqa}.}.
+% Only questions with expert-validated queries that return consistent answers on both the official and local Wikidata 2023 endpoints \footnote{We use the same Wikidata 2023 dump as \cite{huang2023markqa}.} are kept. 
+
+% We now report the statistics of the dataset. 
+The ReQuMA dataset contains 200 English question-SPARQL query pairs. On average, a query contains 1.87 triple patterns and 0.10 filters.
+We define a query's number of hops as the sum of its triple patterns and filters, and the average number of hops for the dataset is 1.97. Notably, the dataset includes 101 multi-hop questions (question whose SPARQL query has a number of hops > 1).
+
+\section{QuAD: a Question-Answer Driven SQA Method}\label{sec:methods}
+
+In this section, we present QuAD, a Question-Answer Driven method for the SQA task, whose pipeline is shown in Fig.\ref{fig:pipeline}. 
+QuAD formulates SPARQL queries as query graphs (Subsection \ref{subsec:query_graph_formulation}). It initiates the process with question decomposition (Subsection \ref{subsec:query decompostion}), followed by the iterative construction of the query graph for the entire question, proceeding sub-question by sub-question (Subsection \ref{subsec:query_graph_construction}). Notably, QuAD is training-free and does not require annotated SPARQL queries.
+
+\subsection{Scope and Structure Formulation}\label{subsec:query_graph_formulation}
+QuAD targets the predominant class of questions in existing KBQA datasets: \textit{conjunctive queries}. Empirical analysis shows that these queries constitute the vast majority of samples in standard datasets.\footnote{Conjunctive queries account for 92.2\%, 92.4\%, and 99.9\% of CWQ \cite{talmor2018web}, WebQSP \cite{yih2016value}, and GrailQA \cite{gu2021beyond}, respectively.} 
+Accordingly, QuAD is specifically designed to construct SPARQL queries where the \texttt{WHERE} clause is a conjunction of triple patterns and \texttt{FILTER}s performing numeric/date comparisons. It supports single-variable projection (\texttt{SELECT DISTINCT}), counting (\texttt{COUNT}), and superlatives (\texttt{ORDER BY ... LIMIT}). Operators such as \texttt{UNION}, \texttt{MINUS}, \texttt{OPTIONAL}, and property paths are excluded from the current scope.
+
+
+QuAD represents SPARQL queries as query graphs. 
+A query graph consists of three types of nodes. \textit{Entities} (rectangles) correspond to existing entities on $\mathcal{K}$. \textit{Variables} (circles) correspond to SPARQL variables; particularly, a \textit{target variable} (solid circles) corresponds to the answers of the query. Edges between entities and variables are relations on $\mathcal{K}$. For example, variable $v_1$ connects with entity \textit{Taylor Swift} via \textit{actor} in the output of Fig.\ref{fig:pipeline}. 
+\textit{Functions} (rounded rectangles) consisting of count, comparisons, and superlatives are operations linked to a variable via blank edges. For example, function (\textit{initial\_release\_date} $>=$ \textit{2009-04-08}) links to $tv_2$ in the output in Fig.\ref{fig:pipeline}. 
+A query graph can be straightforwardly transformed into a query and executed against $\mathcal{K}$.
+
+\subsection{Question Decomposition}\label{subsec:query decompostion}
+We use the question in Fig. \ref{fig:pipeline} as a running example to illustrate the QuAD process.
+QuAD first decomposes the complex question into a tree of nested sub-questions \cite{huang2023qdt}. This determines the high-level structure of the query and narrows the search space.
+As shown in Fig. \ref{fig:pipeline}, the question is decomposed into a tree $T_q = (Q, E)$, where $Q=\{q_1, q_2\}$ represent the sub-questions, and $E=\{(q_1, q_2)\}$ represents their dependency: $q_1$ (root): \textit{Who are the directors of <$q_2$>}, $q_2$ (inner question): \textit{movies featuring Taylor Swift that were released after 8 April 2009}.
+
+KBQA systems usually build queries from the leaves in a bottom-up approach: they would first solve $q_2$, then solve $q_1$. 
+Conversely, leveraging the provided answers in the SQA task, QuAD adopts a top-down approach. Starting from the root ($q_1$), it uses the answers (the directors) to constrain the search, and then progressively constructs the query for each sub-question.
+% Conversely, leveraging the provided final answers, QuAD adopts a top-down approach. It starts from the root ($q_1$), using the known final answers (the directors) to constrain the search, and then progressively constructs the query for each sub-question.
+
+To bridge the gap between this decomposition tree and the final query graph, we make two structural assumptions. 
+First, each sub-question node $q_i$ corresponds to a \textit{target variable} ${tv}_i$ in the query graph: In our example, $q_1$ maps to $tv_1$ (the directors), and $q_2$ to $tv_2$ (the movies).
+Second, each sub-question $q_i$ is modeled as a one-hop query graph $SG_i$ centered on its target variable $tv_i$\footnote{We consider two relations connected by a blank node as a path of length 1.}, with dependencies between sub-questions represented as direct, one-hop relations between their corresponding target variables.
+Applying this to our example, $SG_1$ contains a \textit{director} relation linking $tv_1$ to $tv_2$, while the graph $SG_2$
+contains a one-hop path to entity \textit{Taylor Swift} and a one-hop comparison involving a literal \textit{2009-04-08}).
+By assembling these one-hop subgraphs, QuAD effectively converts the question's decomposition tree into a complete, executable query graph. We prompt \texttt{gpt-3.5-turbo} with hand-picked demonstrations to perform this decomposition.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\linewidth]{quad_pipeline.pdf}
+    \caption{The Overview of QuAD method, dealing question \textit{Who are the directors of movies featuring Taylor Swift that were released after 8 April 2009}.}
+    \label{fig:pipeline}
+\vspace{-1em}
+\end{figure}
+
+%alt text 
+%Alt Text: A horizontal pipeline diagram illustrating the QuAD method. It starts with a complex question: "Who are the directors of movies featuring Taylor Swift that were released after 8 April 2009". The process involves three main stages: (1) Question Decomposition, which breaks the question into a nested tree structure with two sub-questions ($q_1$ and $q_2$); (2) Top-down Query Graph Construction, which begins with the root question $q_1$ and uses final answer entities (e.g., Chris Renaud) as anchors to identify candidate relations like "director"; (3) Iterative Construction and Pruning, where subgraphs ($SG_1, SG_2$) are assembled and executed against the Knowledge Base. The diagram shows how incorrect paths (e.g., runtime relation) are pruned when their execution results fail to cover the answer set, resulting in a final executable SPARQL query graph containing two variables ($tv_1, tv_2$), the entity "Taylor Swift," and a temporal filter.
+
+\subsection{Query Graph Construction}\label{subsec:query_graph_construction}
+
+% QuAD focuses on \textit{conjunctive queries} that combine triple patterns and filters with \texttt{AND}, which constitute a significant majority in current KBQA datasets.\footnote{95\%, 92.2\%, 92.4\%, and 99.9\% of the questions in ReQuMA, CWQ \cite{talmor2018web}, WebQSP \cite{yih2016value}, and GrailQA \cite{gu2021beyond} correspond to conjunctive queries.} 
+% A notable property of conjunctive queries is that their execution results monotonically shrink as their graph patterns expand. 
+A notable property of conjunctive queries is that their result sets shrink monotonically as graph patterns expand.
+This property is the cornerstone of QuAD, allowing to prune the search space by enforcing a core principle: The execution results of any intermediate query graph on $\mathcal{K}$ must contain the answers $\mathcal{A}$.
+
+\noindent \textbf{Step One: Constructing $SG_1$}.
+We continue to use the example in Fig. \ref{fig:pipeline}. We start from $q_1$: \textit{Who are the directors of <$q_2$>}, building its corresponding one-hop subgraph $SG_1$ centering on $tv_1$. The construction consists of two phases:
+
+\textbf{Exploration}. 
+To identify candidate relations in $SG_1$, we use the answer entities in $\mathcal{A}$ (e.g., \textit{Chris Renaud}) as anchors. We perform a one-hop expansion from each anchor and compute the intersection of the resulting relations--a powerful shortcut justified by the nature of conjunctive queries, where a relation in the final graph must apply to every answer.
+This expansion discovers several candidate relations (e.g., \textit{director}, \textit{place\_of\_birth}), which are then ranked using \texttt{BGE-reranker-v2-m3} model according to the semantic similarity with $q_1$. 
+
+\textbf{Enumeration}.
+After obtaining the candidate relations, we enumerate the possible structure for the subgraph $SG_1$. At this initial stage, any one-hop graph formed by a single candidate relation (e.g., $tv_1$ -[\textit{place\_of\_birth}]-> $tv_2$) is valid, as none of them has introduced constraints violating the final answers.  We then rank these candidate graphs by their semantic similarity to $q_1$, forming a beam of intermediate results. In our beam search, we retain the top-scoring candidates (e.g., $SG_{1,1}$, $SG_{1,2}$, ...) for further search.
+
+For clarity of explanation, the following steps will proceed down the single, highest-scoring subgraph that ultimately proves correct—the one built around the \textit{director} relation. Thus, we define the subgraph $SG_1$ as $tv_1$ -[\textit{director}]-> $tv_2$, which represents the semantic "$tv_1$ is the director of $tv_2$". This graph now serves as the \textit{context graph} for processing the next sub-question $q_2$.
+ 
+\noindent \textbf{Step Two: Constructing $SG_2$}.
+We then construct $SG_2$ centering on $tv_2$ for $q_2$: \textit{movies featuring Taylor Swift that were released after 8 April 2009}, using the previously constructed $SG_1$ as the \textit{context graph}.
+
+\textbf{Exploration}.
+The exploration now centers on $tv_2$. We again leverage the answer entities to guide the search. Specifically, we temporarily substitute $tv_1$ in the context graph ($SG_1$) with the answer entities (the directors), which constrains $tv_2$ to be \textit{a movie directed by one of these directors}. Expanding one hop from $tv_2$, which now represents such movies, and using entities and trigger words from $q_2$, we discover several candidate elements for $SG_2$, including: 
+(1) A path to entity: $tv_2$ -[\textit{starring/actor}]-> \textit{Taylor Swift}. 
+(2) A comparison: $tv_2$ -[\textit{initial\_release\_date}]-> $date$, where $date >= $\textit{2009-04-08}; 
+(3) An incorrect comparison: $tv_2$ -[\textit{runtime/cut\_runtime}]-> $val$, where $val >=$ \textit{2009}.
+
+
+\textbf{Enumeration (with Pruning)}.
+We then test the combinations of candidate elements by merging them with the context graph ($SG_1$). A new graph is retained only if its results cover the answer $\mathcal{A}$.
+For example, $G_1 = SG_1 \cup SG_{2,1}$ (using elements (1) and (2)) is validated and retained.
+% This graph serves both as a candidate for the final query and as the new context graph for remaining sub-questions.
+This validated graph is a candidate for the final query graph in this example, but would serve as the new context graph for any remaining sub-questions.
+Conversely, adding element (3) will violate this validation and is immediately pruned, preventing error propagation.
+
+\noindent \textbf{The Whole Search Process}.
+QuAD utilizes beam search, retaining the top-k candidate query graphs at each step. After processing all sub-questions, the final query graph is selected from the beam based on the F1 score of its execution results. If multiple graphs achieve the same highest F1 score, we employ \texttt{gpt-3.5-turbo} for final selection based on semantic similarity.
+
+\noindent \textbf{Handling of Counting and Superlative Questions}.
+QuAD can handle counting questions (of results greater than 0) and superlative questions, which are detected by trigger words (e.g., \textit{the number of}, \textit{earliest}). For counting questions, the search is constrained by starting with the entity type mentioned in the question (e.g., "country"), and the count is used for validation and pruning. For superlative questions, we first build the query graph, and then apply a superlative (e.g., \texttt{ARGMAX}) on the specific relations (e.g., those relations with numeric values) of $tv_1$.
+Notably, Boolean questions (\textit{yes/no}) and counting questions with a result of 0 are inherently unsupported by QuAD, as the monotonic property of conjunctive queries provides no guidance for pruning for these questions.
+
+\noindent\textbf{Implementation}.
+%During exploration, explicitly enumerating millions of intermediate entities is impractical. Instead, 
+Since enumerating intermediate entities is impractical, QuAD utilizes relation paths from answer entities to the current variable ($?tv_i$) as symbolic constraints. 
+For example, when constructing $SG_2$ in Fig. \ref{fig:pipeline}, for each answer entity (e.g., \textit{Chris Renaud}), we substitute $?tv_1$ with this entity in $?tv_1$ -[\textit{director}]-> $?tv_2$, then search the neighborhood around $?tv_2$ based on the substituted graph. This strategy delegates intermediate entity processing to the SPARQL engine and searches the neighborhood relation for an answer entity in a single query.
+To further reduce costs, we filter top-10 neighbor relations by semantic similarity, cache query results, and enforce a 120s global timeout.
+Under these settings, constructing queries for the 1,000 samples (Table \ref{table:sparql_query_construction2}) requires an average runtime of 16.6s (CWQ), 4.1s (WebQSP), and 7.9s (GrailQA) per question, respectively.
+
+\section{Experiments}\label{sec:experiment}
+To evaluate the value of the SQA task, the TSS metric, and the QuAD method, we conduct three experiments as follows:
+Subsection \ref{subsec:human_anno} evaluates the SQA task's facilitation of manual annotation, while investigating the advantage of TSS metric. Subsection \ref{subsec:kbqa_performance} utilizes the constructed queries by our QuAD method to train fine-tuned SP-based methods, validating the SQA task's effect on providing simulated supervision signals. Subsection \ref{subsec:exp_anno_kbqa} evaluates QuAD and other SQA methods on KBQA datasets to investigate the performance of QuAD.
+%and demonstrates the superiority of QuAD.
+
+% We conduct three experiments: The first (Subsection \ref{subsec:human_anno}) evaluates the SQA task's impact on manual annotation and compares the metrics. The second (Subsection \ref{subsec:exp_anno_kbqa}) evaluates SQA methods on current KBQA datasets. The last (Subsection \ref{subsec:kbqa_performance}) trains fine-tuned SP-based methods using QuAD's output as training data.
+
+\subsection{The Effect of SQA Task on Manual Annotation} \label{subsec:human_anno}
+The \textit{annotation time} (i.e., the time to give a query that interprets question intention) reflects manual annotation difficulty.
+We evaluate SQA task's impact on manual annotation by measuring this time under constructed queries.
+% The \textit{annotation time} for annotators, e.g., the time to give a query that interprets question intention, reflects the difficulty of manual annotation difficulty.
+% We assess the impact of the SQA task on manual annotation by measuring the annotation time under constructed queries of varying quality. 
+%We also compare TSS to structure-based metric Tree Edit Distance (TED). 
+
+\begin{table}[t]
+\caption{The Average Test Suite Scores (A. TSS), Average TEDs (A. TED) of the output, and Average Annotation Time per Question (A. ATQ) of annotators for SQA methods. $_{+g}$ denotes the golden setting. Bold fonts denote the best performance among all methods.}
+\centering
+\setlength{\tabcolsep}{10pt}
+\begin{tabular}[ht]{lccc}
+     \toprule
+    \textbf{Methods}  & \textbf{A. TSS} & \textbf{A. TED} & \textbf{A. ATQ} \\
+    \midrule
+    Baseline &--& -- &  112.1s \\ 
+    Queryagent & 0.168 & 0.720  & 92.1s \\
+    Queryagent$_{+g}$  & 0.366 &0.533  & 75.8s\\
+    QuAD  & 0.336 & 0.602 & 71.2s \\ 
+    QuAD$_{+g}$ & \textbf{0.535} & \textbf{0.451} &  \textbf{52.2s}\\
+    \bottomrule    
+\end{tabular}
+\vspace{-1em}
+\label{table:annotation_exps} 
+\end{table}
+
+\noindent\textbf{Experimental Setups.}
+%staged
+Since existing staged generation or recommendation methods are difficult to adapt to Wikidata, we re-implement the few-shot SP-based QueryAgent \cite{huang2024queryagent} on Wikidata for comparison.
+% Due to the lack of staged query generation methods and query recommendation methods for Wikidata and the difficulty of their adaptation, we re-implement the few-shot SP-based method QueryAgent \cite{huang2024queryagent} for Wikidata for comparison.
+
+We process ReQuMA to provide annotators with the natural language questions $q$, answer entities $\mathcal{A}$, entity linking results $\mathcal{E}$, and constructed queries $s$ from different SQA methods.
+% We process ReQuMA to pair questions with additional information: Entities in question $\mathcal{E}$, answer entities $\mathcal{A}$, and constructed queries from different SQA methods.
+We use CLOCQ \cite{christmann2022beyond} to obtain $\mathcal{A}$. 
+For $\mathcal{E}$, we adopt two settings: the \textit{default setting}, where we use CLOCQ to obtain $\mathcal{E}$; the \textit{golden setting}, where $\mathcal{E}$ is extracted from the golden query.
+% For $\mathcal{E}$, we also adopt two settings, and use CLOCQ to obtain $\mathcal{E}$ in the default setting.
+We select 5 SQA methods: Baseline (no constructed queries, default setting), QueryAgent (QueryAgent, default setting), QueryAgent$_{+g}$ (QueryAgent, golden setting), QuAD, and QuAD$_{+g}$.
+% The details can be found in Appendix \ref{appendix:detail_of_experiment}.
+We invite 5 postgraduates familiar with Wikidata to serve as annotators. Every annotator is asked to annotate queries for all 200 questions, utilizing the official Wikidata website and a local Wikidata 2023 endpoint. We record their annotation time on each question.
+% \footnote{ReQuMA ensures that the result of expected queries is consistent on current Wikidata official endpoint and Wikidata 2023 endpoint. See Appendix \ref{appendix:collection_of_ReQuMA} for details.}
+We ensure that different SQA model outputs are randomly provided to different annotators on each question. We encourage them to base their annotations on the SQA model outputs.
+
+
+\noindent\textbf{Results.}
+We report the evaluation metrics of SQA task outputs and the average annotation time of annotators in Table \ref{table:annotation_exps}.
+Overall, providing constructed queries consistently decreases the average manual annotation time compared to the baseline.
+% The least performing QueryAgent reduces the annotation time by 18\%.
+Meanwhile, QuAD outperforms QueryAgent on both metrics and further reduces annotation time in both settings. 
+The results indicate that the SQA task can indeed reduce the difficulty of manual annotation and demonstrate the advantage of QuAD over QueryAgent in this scenario. Notably, even under the default setting, the two SQA methods still provide substantial benefits. 
+
+\begin{figure}[h]
+\vspace{-2em}
+\centering
+\begin{minipage}[t]{0.45\textwidth}
+    \strut\vspace*{-\baselineskip}\newline
+    \centering
+    \includegraphics[width=\linewidth]{scatter.png} % 替换为你的图片路径
+    \caption{Scatter plot of annotator's annotation time vs. SQA task outputs' TSS and TED for the valid 859 annotations. Higher-quality suggestions correspond to shorter, more concentrated annotation times, while lower-quality ones show larger variance.}
+    \label{fig:time_f1_ATED_scatter}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.52\textwidth}
+    \strut\vspace*{-\baselineskip}\newline
+    \centering
+    \vspace{-0em}
+    \captionof{table}{Average annotation time grouped by question complexity (\#Hops) and suggestion quality (TSS/TED) over the 859 valid annotations. The time reduction is particularly evident for complex multi-hop questions when high-quality queries are provided.}
+    {\small
+    \begin{tabular}{crrrr}
+    \toprule
+    \#Hops & TSS=0 & $(0, 0.25]$ & $(0.25, 0.75]$  & $(0.75, 1]$ \\
+    \midrule
+    1 & 65.3s & 45.2s & 27.9s & 15.8s \\
+    2 & 91.8s & 28.2s & 61.5s & 20.6s \\
+    3 & 148.6s & 84.7s & 63.6s & 22.3s \\
+    >3 & 207.4s & 173.0s & 112.3s & 18.0s \\
+    \bottomrule
+    \toprule
+    \#Hops & TED=1 & $[0.75, 1)$ & $[0.25, 0.75)$  & $[0,0.25)$ \\
+    \midrule
+    1 & 67.1s & 31.8s & 51.5s & 16.7s \\
+    2 & 93.3s & 9.0s & 36.3s & 23.0s \\
+    3 & 151.2s & 53.7s & 74.8s & 26.9s \\
+    >3 & 206.7s & 152.3s & 168.1s & 16.9s \\
+    \bottomrule
+    \end{tabular}
+    }
+    \label{tab:annotime_vs_hop_ted}
+\end{minipage}
+\vspace{-2em}
+\end{figure}
+
+\noindent \textbf{How Do Constructed Queries Help Annotation?}
+%To study in detail how constructed queries help annotation, 
+We examine the annotation time against the metrics. 
+% Among the 1,000 assigned tasks (200 questions $\times$ 5 annotators), we discard cases due to natural language ambiguity or failure to locate answers, resulting in 859 valid annotations. 
+Filtering cases with language ambiguity or unlocatable answers from the 1,000 assigned tasks (200$\times$5) yields 859 valid annotations.
+As shown in Fig. \ref{fig:time_f1_ATED_scatter}, for these valid cases, higher-quality queries (TSS $\approx$ 1 or TED $\approx$ 0) lead to annotation times densely clustered near 0.
+This indicates that when the constructed queries are of high quality, only minimal checking or correction is needed.
+Conversely, lower-quality suggestions exhibit a larger variance and longer durations: time-consuming annotations (over 200 seconds) occur almost exclusively when TSS $\approx$ 0, or TED $\approx$ 1.
+This indicates: 1) Even partially correct constructed queries facilitate annotation. 2) It is also challenging for humans on those questions where the SQA methods fail.
+
+We further examine annotation time under the numbers of hops of the golden queries (reflecting the difficulty of the question) and the metrics of the constructed queries in Table \ref{tab:annotime_vs_hop_ted}. From the table, annotation time increases with more hops, but this increase is significantly mitigated by higher query quality (lower TED, higher TSS). This suggests that, while the difficulty of annotating multi-hop questions significantly increases with the number of hops, high-quality constructed queries can reduce this difficulty.
+
+\noindent \textbf{Discussion of Metrics.}
+When assessing the similarity between two queries, existing metrics primarily exhibit two types of errors: False Negatives (FNs) and False Positives (FPs). 
+TED inherently avoids FPs but suffers from FNs due to semantic equivalence, while F1 score avoids FNs but is prone to FPs \cite{zhong2020semanticsql}.
+To assess whether TSS can mitigate these shortcomings, we inspect the outputs with F1 score = 1 from the 800 SQA task outputs in ReQuMA, resulting in 313 unique outputs, of which 234 are identified as correct (equivalent to golden queries). 
+
+
+
+We use the metrics to judge the correctness of these outputs and compare the number of errors.
+%For the F1 score, we consider F1$\ =1$ as the indicator of correctness (actually, they are all judged right by the F1 score). 
+Ideally, two equivalent queries should have TED of 0 or TSS of 1. However, some equivalent queries may have TED $>$ 0 or TSS $<$ 1 due to the schema (E.g., relation domains implicitly restrict subject types) or the incompleteness of the KB (E.g., reversible relations without reversions).
+Therefore, we set a threshold $\tau$ indicating the tolerance for such mistakes, consider TED$\ \le 1- \tau$ and TSS $\ \ge \tau$ as the indicators of correctness, and draw the curves of each metric's number of FNs and FPs on these queries, as shown in Fig.\ref{fig:metric_discuss}. 
+
+
+\begin{figure}[ht]
+    \vspace{-2em}
+    \includegraphics[width=\linewidth]{fp_fn.png}
+    \caption{The number of False Negatives (FNs) and False Positives (FPs) for different metrics at different $\tau$ for the selected outputs with an F1 score of 1.}
+    \label{fig:metric_discuss}
+    \vspace{-1em}
+\end{figure}
+
+
+%alt text
+%A line graph comparing the number of False Negatives (FNs) and False Positives (FPs) for three metrics: F1 Score, TED, and TSS, across different threshold levels (tau). The x-axis represents the threshold tau from 0 to 1, and the y-axis shows the count of errors. The graph shows that the F1 score has a constant, high number of FPs. TED maintains zero FPs but has a very high number of FNs. In contrast, the TSS metric curves demonstrate a superior balance: it effectively reduces FPs compared to the F1 score, and its FNs can be significantly mitigated as tau increases, eventually outperforming TED by achieving lower error counts in both categories.
+
+
+From Fig.\ref{fig:metric_discuss}, the TSS reduces FPs compared to the F1 score. Furthermore, its FNs can be mitigated by adjusting $\tau$, outperforming TED while keeping relatively low FPs. This indicates that TSS achieves a more balanced performance in terms of FNs and FPs compared to TED and F1 score.
+Meanwhile, a correlation between the TSS and annotation time is observed from Table \ref{table:annotation_exps}. This correlation, together with TSS's balanced performance in reducing FNs and FPs, 
+demonstrates that TSS is a well-suited evaluation metric for the SQA task.
+
+
+
+\noindent \textbf{Discussion on Limitations of TSS.}
+% We want to discuss a special case: Two equivalent queries may have some non-overlapping items, e.g., \texttt{\{?x :mayor :London\}} is equivalent to \texttt{\{?x :mayor ?city, :UK :capital ?city\}}.
+An obvious case of FNs is that two equivalent queries on a certain KB may have non-overlapping entities (consider \texttt{\{?x :mayor :London\}} and \texttt{\{?x :mayor ?city, :UK :capital ?city\}}). Since TSS replaces overlapping entities and monitors changes in query execution results, TSS $=$ 1 infers that all entities in queries must fully overlap. So, TSS is prone to this case.
+However, this case is also challenging for TED to handle: TED $=$ 0 also infers that all entities in queries fully overlap.
+Furthermore, such equivalence stems from the KB's structure rather than language: since they contain different entities, their results will be different on specific RDF datasets, violating the definition of semantic equivalence of SPARQL queries in \cite{perez2009semantics}.
+It is also worth noting that such cases are relatively uncommon. In the 234 query pairs identified as correct, only 11, or 4.7\% of pairs have non-overlapping entities.
+% Due to the nuanced nature and rarity of such equivalence, and the fact that existing metrics also struggle to handle it, 
+Therefore, the current TSS does not prioritize cases of non-overlapping entities.
+
+
+
+\subsection{The Effect of SQA Task on KBQA}\label{subsec:kbqa_performance}
+
+We investigate using constructed queries as simulated supervision to maintain SP-based methods' performance without golden queries.
+
+% We investigate whether the SQA task helps fine-tuned SP-based methods to maintain competitive performance in the absence of golden queries by replacing their training data with constructed queries.
+
+\noindent \textbf{Experiment Settings}. 
+We use three KBQA datasets on Freebase \cite{bollacker2008freebase}: CWQ \cite{talmor2018web}, GrailQA \cite{gu2021beyond}, and WebQSP \cite{yih2016value}. 
+For each dataset, we use the constructed queries of QuAD in the training sets and validation sets as simulated training data.
+%to train fine-tuned SP-based methods. 
+We take the provided answer entities directly as $\mathcal{A}$.
+We also adopt the two settings for $\mathcal{E}$, and obtain $\mathcal{E}$ based on FACC1 \cite{facc1} in the default setting.
+% We also adopt the two settings for entities in question $\mathcal{E}$, and obtain $\mathcal{E}$ based on FACC1 \cite{facc1} matching in the default setting.
+We remove the examples where QuAD fails to construct a query of F1 score = 1.  
+We then use these simulated training data to fine-tune the fine-tuned SP-based methods Pangu \cite{gu2023pangu} on GrailQA and WebQSP, and GMT-KBQA \cite{hu2022gmt} on CWQ.
+
+
+\begin{table}[t]
+\centering
+\caption{KBQA performance (F1 in percentage) of SP-based methods (with a brief comparison to IR-based methods).
+Methods without $^*$ use predicted entity linking (non-golden).
+$_{+g}$ denotes the golden setting of QuAD. 
+The results of competitors are from their original papers. const. queries: constructed queries.}
+\label{table:kbqa_performance}
+\setlength{\tabcolsep}{6pt} 
+\begin{tabular}{lcccc}
+    \toprule
+    \textbf{Methods} & \textbf{Training Data} & \textbf{CWQ} & \textbf{GrailQA} & \textbf{WebQSP} \\
+    \midrule
+    \multicolumn{5}{l}{\textbf{SP-based Methods}} \\
+    \textit{Staged query generation} & & & & \\
+    QGG & golden answers & 40.4 & 36.7 & 74.0$^*$ \\
+    \addlinespace
+    \textit{Few-shot} & & & & \\
+    KB-BINDER & few-shot & - & 56.0 & 53.2 \\
+    QueryAgent & few-shot & - & 60.5 & 63.9 \\
+    Pangu (few-shot) & few-shot & - & 62.7 & 54.5 \\
+    \addlinespace
+    \textit{Fine-tuned (golden queries)} & & & & \\
+    GMT-KBQA & golden queries & 77.0 & - & - \\
+    Pangu & golden queries & - & 79.9 & 77.9$^*$ \\
+    \addlinespace
+    \textit{Fine-tuned (const. queries)} & & & & \\
+    GMT-KBQA & QuAD & 49.6 & - & - \\
+    GMT-KBQA & QuAD$_{+g}$ & 61.4 & - & - \\
+    Pangu & QuAD & - & 70.9 & 74.1$^*$ \\
+    Pangu & QuAD$_{+g}$ & - & 72.6 & 75.5$^*$ \\
+    \midrule
+    \multicolumn{5}{l}{\textbf{IR-based Methods}} \\
+    EPR-KGQA & golden answers & 61.2$^*$ & - & 70.2$^*$ \\
+    ReasoningLM & golden answers & 64.0$^*$ & - & 70.1$^*$ \\
+    RoG & golden answers & 56.2$^*$ & - & 70.8$^*$ \\
+    \bottomrule
+\end{tabular}
+\vspace{-1em}
+\end{table}
+ 
+We reproduce the result of Pangu \cite{gu2023pangu} and GMT-KBQA \cite{hu2022gmt} with our simulated training data. We run the experiment on a server with Intel Xeon Gold 5222 CPUs and NVIDIA RTX 3090 GPUs.
+In our reproduction, Pangu uses T5-base \cite{raffel2020t5} on GrailQA and BERT-base \cite{delvin2019bert} on WebQSP, GMT-KBQA uses T5-base on CWQ. We follow the hyperparameter settings reported in the original paper.
+
+\noindent \textbf{Results}. 
+We report the KBQA performances (F1 score) in Table \ref{table:kbqa_performance}.
+Overall, fine-tuned SP-based methods using constructed queries keep comparable performance.
+When compared to few-shot and staged query generation SP-based methods, Pangu with QuAD is competitive with all competitors on WebQSP, and Pangu with QuAD$_{+g}$ outperforms the best QGG by 1.5\%.
+On GrailQA,  Pangu with QuAD outperforms the strongest competitor, few-shot Pangu (with Codex), by 8.2\%.
+On CWQ, GMT-KBQA with QuAD outperforms QGG by 9.2\%.
+
+We also briefly compare our results with IR-based methods that are trained using gold-standard answers (golden answers).
+On CWQ, GMT-KBQA with QuAD$_{+g}$ is comparable to EPR-KGQA \cite{ding2024epr}, but lower than ReasoningLM \cite{jiang2023reasoningLM}. 
+On WebQSP, Pangu with QuAD$_{+g}$ outperforms RoG \cite{luo2023reasoning} by 4.7\%.
+
+The results indicate that although constructed queries may contain errors, they still retain substantial correct information, making them acceptable as supervision signals and providing a compromise solution for SP-based methods. 
+%The outputs of the SQA task can be directly utilized for training to achieve competitive KBQA performance. 
+
+
+
+\subsection{Performance of SQA Methods} \label{subsec:exp_anno_kbqa}
+
+We further use these KBQA datasets to study the performance of SQA methods.
+
+% We use three KBQA datasets on Freebase \cite{bollacker2008freebase} to study the performance of different SQA methods: CWQ \cite{talmor2018web}, GrailQA \cite{gu2021beyond} and WebQSP \cite{yih2016value}.
+\noindent \textbf{Experimental Settings}.
+We use the same settings for $\mathcal{E}$ and $\mathcal{A}$ as in \ref{subsec:kbqa_performance}
+We compare QuAD with few-shot KB-Binder \cite{li2023binder} and QueryAgent \cite{huang2024queryagent}, staged query generation method QGG \cite{lan2020qgg} and a training-free adaptation QGG-A (utilizing answers to filter results), and LSQ-A, a similar adaptation of query recommendation method LSQ \cite{potoniec2019lsq}. We run these methods on 1,000 samples from the test sets of the datasets and compare the average TSS of their outputs.
+% The details are in Appendix \ref{appendix:detail_of_experiment}.
+
+\begin{table}[t]
+% \small
+\centering
+\caption{The average TSS and TED of SQA methods.  $^+$ denotes training on the training set. $_{+g}$ denotes the golden setting. Bold fonts denote the best performance among all methods, and underlined fonts denote the second-best performance.}
+\setlength{\tabcolsep}{8pt}
+\begin{tabular}[t]{lcc|cc|cc}
+     \toprule
+    \multirow{2}{*}{\textbf{Methods}}  & \multicolumn{2}{c|}{\textbf{CWQ}}  &   
+    \multicolumn{2}{c|}{\textbf{GrailQA}}&   
+    \multicolumn{2}{c}{\textbf{WebQSP}}  \\    
+   \cmidrule{2-7} 
+    % & ATED $\downarrow$ & TED=0 (\%) & S. F1 (\%) & ATED $\downarrow$ & TED=0 (\%) & S. F1 (\%) & ATED $\downarrow$ & TED=0 (\%) & S. F1 (\%) \\
+     & A.TSS  & A.TED  & A.TSS  & A.TED & A.TSS &A.TED  \\
+    \midrule
+    QGG$^+$ & 0.132 & \underline{0.432} & -- & -- & 0.602 & 0.186 \\
+    QGG-A &  0.076 & 0.569  & -- & -- & \underline{0.665} & \underline{0.185}  \\
+    KB-BINDER & -- & -- & 0.429  & 0.407 & 0.301 & 0.457\\
+    LSQ-A & 0.036 & 0.732 & 0.160 & 0.438 & 0.202  & 0.422  \\
+    QueryAgent & 0.106 & 0.528 & 0.527 & \underline{0.275} & 0.551 & 0.248 \\
+    % \textbf{QueryAgent}$_{+g}$ & 32.6\%  & -- &  -- \\
+    \midrule
+    QuAD & \underline{0.236} & 0.543 &  \underline{0.548} & 0.382 & 0.554 & 0.208 \\
+    QuAD$_{+g}$ & \textbf{0.368} & \textbf{0.380} & \textbf{0.710} & \textbf{0.166} & \textbf{0.669} & \textbf{0.165} \\    % 
+    \bottomrule    
+\end{tabular}
+\vspace{-1em}
+\label{table:sparql_query_construction2} 
+\end{table}
+
+
+\noindent \textbf{Results.}
+We report the performance of methods in Table \ref{table:sparql_query_construction2}. Regarding TSS,
+on CWQ and GrailQA, QuAD outperforms the competitors, especially on complex CWQ, surpassing QGG trained on the training set by 0.1.
+% on CWQ and GrailQA, QuAD outperforms the competitors, and the advantage is more pronounced on more complex CWQ by 10\%, beating QGG that trains on the training set.
+%with those of QueryAgent and QGG in Table \ref{table:sparql_query_construction}.
+This indicates that answer utilization narrows the search space and prevents error propagation, particularly for complex, multi-step questions. 
+% This indicates that the utilization of answers effectively narrows down the search space and avoids error propagation, especially for those complex questions that need multiple steps to solve. 
+When handling simple questions in WebQSP, this advantage diminishes, and QuAD performs comparably to QueryAgent. Nevertheless, QGG-A outperforms QGG, showing that using answers as verification enhances performance.
+% When handling simple questions in WebQSP, this advantage diminishes since they may be solved in one step, and QuAD performs equally to QueryAgent. Nevertheless, QGG-A beats QGG, showing that using answers as verification enhances performance.
+Regarding TED, QuAD does not demonstrate significant advantages, but remains competitive.
+This is likely because QuAD constructs queries that semantically interpret the question rather than structurally mirror the golden query, naturally favoring TSS over TED.
+
+
+
+
+\section{Conclusion} \label{sec:conclusion}
+
+In this paper, we propose the SPARQL Query Annotating (SQA) task, which automatically annotates SPARQL queries from question-answer pairs to enhance fine-tuned semantic parsing-based methods. 
+We present the Test Suite Score (TSS) as a novel metric for the evaluation of the SQA task. 
+%Existing KBQA datasets can be used for the evaluation of the SQA methods. 
+We construct the ReQuMA dataset to assess the effectiveness of the SQA task on manual query annotation. Additionally, we present QuAD, a question-answer driven method for the SQA task.
+Experiments demonstrate: (1) SQA’s effectiveness in aiding manual annotation, (2) the competitiveness of SP-based methods trained on constructed queries, and (3) QuAD’s substantial performance.
+% Our experiments demonstrate: 1) the effectiveness of the SQA task in facilitating manual query annotation, 2) the competitive performance of fine-tuned SP-based methods trained with constructed queries, and 3) the substantial performance of QuAD.
+
+We outline limitations and future work as follows:
+1) \textit{Unanswerable Questions}. The current SQA task assumes all given questions can be answered by the KB. However, real-world KBs are incomplete. Handling unanswerable questions will improve SQA's practicality. 
+2) \textit{Entity Linking Dependency}: Our approach heavily relies on the performance of entity linking (a common bottleneck for SQA and SP). Reducing this dependency is a key future direction.
+3) \textit{Supported SPARQL Fragment}: QuAD's current scope is restricted. We plan to extend QuAD to support property paths and other fragments beyond conjunctive queries.
+4) \textit{TSS Usage}: Beyond the limitation of non-overlapping items (as discussed in Subsection \ref{subsec:human_anno}), TSS relies on golden queries. We envision using it as a \textit{weak signal} to quantify manual correction effort, identifying challenging examples for SQA method improvement in an iterative bootstrapping lifecycle.
+
+
+\section*{Acknowledgement}
+This work is supported by the National Science and Technology Innovation 2030 Major Program (2025ZD0544900). We thank the anonymous reviewers for their constructive comments, which help
+to improve the quality of this paper.
+
+\paragraph*{Supplemental Material Statement:} 
+Our code, results, and ReQuMA dataset are available at the repository \url{https://github.com/nju-websoft/SQA}.
+
+\paragraph*{Use of Generative AI:} 
+Gemini-2.5pro and DeepSeek-v3 are utilized to polish the language of this paper. \texttt{gpt-3.5-turbo} is used as the LLM backbone of LLM-based methods in this paper.
+%本文的润色使用了DeepSeek和GPT模型。在实验中，使用了GPT3.5turbo模型。
+
+\bibliographystyle{splncs04}
+\bibliography{custom}
+
+
+\end{document}

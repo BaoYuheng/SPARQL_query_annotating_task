@@ -1,3 +1,10 @@
 __pycache__/
 *.py[cod]
 *$py.class
+/data
+/unused
+/src_old
+/.claude
+/backup
+/discussion_room
+/scripts_backup
